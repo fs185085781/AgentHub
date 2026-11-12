@@ -1,0 +1,25 @@
+{
+  "_readme": "这是模板。真正生效的是 <数据目录>/agent_auto/rules.json（优先）。models 为空 = 不接管任何模型，行为与原生完全一致。",
+  "_fields": {
+    "models": "对外模型名 → 候选数组。每个候选写 channel(渠道 key) + model(该渠道的上游真实模型名)。顺序不代表优先级，由积分阶梯跨渠道重排。",
+    "free_channels": "整渠道按『免费号』处理的渠道 key 列表，例如 [\"cline_free\"]。",
+    "api_keys": "旧 Token → 真实 Token 的映射（验权前替换），例如 {\"sk_old123\":\"sk_new456\"}。左边是外部客户端现在用的，右边是本机密钥库里真实有效的。文件含明文，勿提交仓库。",
+    "ladder": "积分阶梯顺序，默认免费 → 到期积分 → 永久积分（期限未知恒排最后）。",
+    "expose": "only = /v1/models 只列本文件里的名字；merge = 追加在原生列表之后。",
+    "exclusive": "true = 本文件之外的名字一律 404；false = 原生模型名照常可用。",
+    "strictRules": "true = 规则命中但候选全不可用时直接 503（规则权威）。",
+    "sticky": "同一模型在 TTL 内优先落在同一个号上，只在同档位内做 tie-break。",
+    "penalize": "上游判定某号不可用后，本地再压制 coolSec 秒。",
+    "debug": "true = 把每次选号决策写入 <数据目录>/agent_auto/decisions.jsonl。"
+  },
+  "models": {},
+  "free_channels": [],
+  "api_keys": {},
+  "ladder": ["free", "expiring", "permanent"],
+  "expose": "only",
+  "exclusive": false,
+  "strictRules": true,
+  "sticky": { "enabled": true, "ttlSec": 600 },
+  "penalize": { "coolSec": 120 },
+  "debug": false
+}

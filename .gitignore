@@ -75,3 +75,6 @@ gateway/public/
 
 # 已停止维护模块的归档代码（本地保留备查，禁止提交与推送）
 /废弃代码（禁止git提交推送）/
+
+
+/ai_plan/AgentHub-Setup-*.exe

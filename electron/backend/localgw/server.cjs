@@ -62,7 +62,7 @@ function authenticate(req) {
   const m = String(h).match(/^Bearer\s+(.+)$/i);
   // Claude Code / Anthropic SDK 走的是 x-api-key 头：原代码注释声称兼容但只读了 Authorization，
   // 结果 Anthropic 客户端 100% 401。这里补上（Bearer 优先，其次 x-api-key）。
-  const raw = (m ? m[1] : (req.headers["x-api-key"] || "")).trim();
+  const raw = require("./agent_auto/index.cjs").translateKey((m ? m[1] : (req.headers["x-api-key"] || "")).trim());
   if (!raw) return { ok: false, status: 401, message: "缺少 Bearer Token（或 x-api-key 头）" };
   const r = keysStore.authenticate(raw);
   if (r.ok) return { ok: true, kind: "apikey", key: r.key };
@@ -347,7 +347,7 @@ async function handleCompletion(req, res, ctx, protocol) {
     const allowed = ctx.isApiKey && ctx.key?.scopes?.length && !ctx.key.scopes.includes("*") ? new Set(ctx.key.scopes) : null;
     const authorizeChannel = catalogAuthorization(ctx);
     const snapshot = await models.prepare({ ...catalogContext(ctx, authorizeChannel), signal: ac.signal });
-    const declared = models.bindings(model, new Set(), snapshot).filter((m) => !allowed || allowed.has(m.channel));
+    const declared = require("./agent_auto/index.cjs").declare(model, models.bindings(model, new Set(), snapshot).filter((m) => !allowed || allowed.has(m.channel)), { allowed, snapshot });
     // 模型组先解析：组存在但成员渠道全被关闭时 declared 是空数组，错误文案要说清是「组没有可用成员」
     const group = models.groupSpec(model, snapshot);
     if (!declared.length) {
@@ -429,6 +429,7 @@ async function handleCompletion(req, res, ctx, protocol) {
           continue;
         }
       }
+      binding = require("./agent_auto/index.cjs").apply(binding, { bindings, model, excluded, triedAccounts, attempt: attemptLedger.used + 1 }) || binding;
       const channel = binding.channel;
       // 账号排重键：普通模型按渠道；组按「渠道 + 实际模型」（同渠道不同模型的可用账号可能不同）
       const accountScope = groupMode ? routing.groupMemberKey(binding) : channel;
@@ -537,7 +538,7 @@ async function handleModels(req, res, ctx) {
   const allowed = ctx?.key?.scopes?.length && !ctx.key.scopes.includes("*") ? new Set(ctx.key.scopes) : null;
   const snapshot = await prepareRequestCatalog(req, res, ctx);
   if (res.destroyed) return;
-  const rows = [...new Map(models.list(snapshot).filter((m) => (!allowed || allowed.has(m.channel)) && serviceReady(m.channel)).map((m) => [m.display, m])).values()].map((m) => ({
+  const rows = [...new Map(require("./agent_auto/index.cjs").list(snapshot).filter((m) => (!allowed || allowed.has(m.channel)) && serviceReady(m.channel)).map((m) => [m.display, m])).values()].map((m) => ({
     id: m.display,
     object: "model",
     created: Math.floor(Date.now() / 1000),
@@ -552,7 +553,7 @@ async function handleAnthropicModels(req, res, ctx) {
   const allowed = ctx?.key?.scopes?.length && !ctx.key.scopes.includes("*") ? new Set(ctx.key.scopes) : null;
   const snapshot = await prepareRequestCatalog(req, res, ctx);
   if (res.destroyed) return;
-  const rows = [...new Map(models.list(snapshot).filter((m) => (!allowed || allowed.has(m.channel)) && serviceReady(m.channel)).map((m) => [m.display, m])).values()];
+  const rows = [...new Map(require("./agent_auto/index.cjs").list(snapshot).filter((m) => (!allowed || allowed.has(m.channel)) && serviceReady(m.channel)).map((m) => [m.display, m])).values()];
   sendJson(res, 200, { data: rows.map((m) => ({ id: m.display, type: "model", display_name: m.display })), has_more: false, first_id: rows[0]?.display || null, last_id: rows.at(-1)?.display || null });
 }
 
@@ -728,6 +729,7 @@ async function start() {
 }
 
 async function doStart() {
+  try { require("./agent_auto/index.cjs").ensureDictLater(null); } catch { /* 启动时先落一份渠道字典；失败不影响启动 */ }
   const c = lgwConfig.get();
   const bind = c.bind || "127.0.0.1";
 

@@ -50,6 +50,8 @@ const ALLOWED_COMMANDS = new Set([
   "skills_side_stats",
   "probe_agents",
   "remove_tool",
+  "skills_daily_check",
+  "skills_daily_check_status",
   // ===== 技能仓库：总览 / 技能库 =====
   "get_overview",
   "list_skills",
@@ -305,6 +307,7 @@ const ALLOWED_COMMANDS = new Set([
   "memory_provider_test",
   "memory_provider_fetch_models",
   "memory_provider_quirks",
+  "memory_provider_import_gateway",
   "memory_model_list",
   "memory_model_save",
   "memory_model_delete",
@@ -470,6 +473,8 @@ const ALLOWED_COMMANDS = new Set([
   "localgw_models_set_group",
   // 删除单条模型规则（无法用 config_patch 实现删除，见 models.cjs 的 removeRule）
   "localgw_models_remove_rule",
+  // 积分优先选号的只读预览（无副作用）：输入对外模型名 → 候选渠道/真实模型/账号及原因
+  "localgw_credit_route_preview",
   "localgw_config_get",
   "localgw_config_patch",
   // 出站伪装与清洗（契约 §4.8）：三条通道必须与 index.cjs 的 ipcMain.handle 同步登记

@@ -159,7 +159,7 @@ const MULTI_OPTION_LABELS: Record<string, Record<string, string>> = {
   "ui.tabs": {
     dashboard: "仪表盘", browse: "记忆浏览", projects: "项目归档", profile: "深层画像",
     hub: "接入与迁移", agents: "Agent 接入", index: "检索与索引", auto: "自动化",
-    import: "导入与去重", sync: "WebDAV同步",
+    import: "导入与去重", sync: "WebDAV同步", logic: "记忆逻辑说明",
   },
 };
 function multiLabel(key: string, o: string): string {
@@ -312,7 +312,7 @@ const shownKeys = computed(() => (advancedOpen.value ? visibleKeys.value : basic
     <div class="mem-card">
       <div class="mem-card-title">
         模块与存储
-        <span class="mem-hint">根目录改动需迁移数据（可勾选自动迁移）</span>
+        <span class="mem-hint">根目录改动需迁移数据（点「更改并迁移」自动搬数据并重建索引）</span>
       </div>
       <div class="mem-kv">
         <span class="k">启用状态</span>
@@ -407,7 +407,6 @@ const shownKeys = computed(() => (advancedOpen.value ? visibleKeys.value : basic
 
           <template v-else-if="mem.schema[key].type === 'boolean'">
             <div class="switch" :class="{ on: !!readPath(draft, key) }" role="switch" :aria-checked="!!readPath(draft, key)" @click="setValue(key, !readPath(draft, key))"></div>
-            <span class="mem-hint">{{ readPath(draft, key) ? "开启" : "关闭" }}</span>
           </template>
 
           <template v-else-if="mem.schema[key].type === 'number'">

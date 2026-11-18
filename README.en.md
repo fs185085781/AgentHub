@@ -14,9 +14,11 @@ AgentHub is a locally-run control center (Electron + Vue 3 + TypeScript). It shi
 
 The **Windows desktop app** carries all six sections (see [Windows download & install](#windows-download--install)) and the **Docker image** (four-module headless + Web console, see [Docker deployment](#docker-deployment)). The **Local Gateway** exposes your upstream model services as an OpenAI / Anthropic compatible endpoint on the loopback interface, with upstreams added as custom providers.
 
+**Before using this project, read the [Disclaimer](#disclaimer) and the [Full statement](#full-statement) in full.**
+
 | Section | In one line | Who it's for |
 | --- | --- | --- |
-| **Usage Stats** | Aggregate token usage and cost from 22 data sources, sliced by day / project / model | Anyone who wants to know what this month actually cost |
+| **Usage Stats** | Aggregate token usage and cost from 23 data sources, sliced by day / project / model | Anyone who wants to know what this month actually cost |
 | **Memory Hub** | A local Markdown memory store plus an MCP server, so agents remember your project and preferences | Anyone tired of re-explaining context in every new session |
 | **Prompt Library** | Expand a one-liner into a well-formed prompt, keep the good ones, plus a curated catalogue of 60 | Anyone rewriting the same prompt, or unsure how to state a request clearly |
 | **Pool Keeper** | Collect accounts from every channel into one pool: balances, check-ins, cross-device sync | People holding quota across channels (Trae / WorkBuddy / Raccoon / ModelScope / ZCode / Qoder / Cline and 21 channels in total) who want to know what is left |
@@ -50,6 +52,8 @@ Full details are in [SPONSOR.md](./SPONSOR.md).
 - [FAQ](#faq)
 - [Development & self-test](#development--self-test)
 - [Disclaimer](#disclaimer)
+- [Author](#author)
+- [License](#license)
 - [Full statement](#full-statement)
 
 ---
@@ -69,26 +73,38 @@ cd AgentHub
 cp gateway/.env.example gateway/.env
 # Edit gateway/.env and fill in your own keys and tokens:
 #   AGENTHUB_SECRET_KEY=your credential encryption key (user-defined, 32+ chars recommended)
-#   AGENTHUB_ADMIN_TOKEN=your admin password (user-defined, something memorable)
+#   AGENTHUB_ADMIN_TOKEN=your admin password (user-defined; required for remote access)
 
-# ③ Start (compose reads gateway/.env automatically)
+# ③ Prepare the data directory (owner must be uid 1000: the container runs as USER node)
+mkdir -p gateway-data && sudo chown 1000:1000 gateway-data
+
+# ④ Start (compose reads gateway/.env automatically)
 docker compose --env-file gateway/.env -f gateway/docker-compose.yml up -d --build
 ```
 
-- Gateway: `http://<host>:9527/v1` (OpenAI / Anthropic / Responses compatible)
-- Admin API: `http://127.0.0.1:9528/api` (binds to loopback by default)
-- Web console: `http://<host>:9528/` (log in with `AGENTHUB_ADMIN_TOKEN`)
+- Gateway: `http://<host>:19527/v1` (OpenAI / Anthropic / Responses compatible)
+- Admin API: `http://127.0.0.1:19528/api` (binds to host loopback by default)
+- Web console: `http://127.0.0.1:19528/` (log in with `AGENTHUB_ADMIN_TOKEN`)
+
+> The ports are **19527 / 19528**, not 9527 / 9528: the desktop app pins its local gateway to
+> `9527/127.0.0.1`, so reusing them on the same machine collides — and the collision shows up as
+> "the desktop gateway won't start". To keep the old ports, set `AGENTHUB_PROXY_PORT=9527` and
+> `AGENTHUB_ADMIN_PORT=9528` explicitly in `gateway/.env`.
 
 ### Environment variables
 
 | Variable | Required | Description |
 | --- | --- | --- |
 | `AGENTHUB_SECRET_KEY` | Yes | Credential encryption key (enc:v2 AES-256-GCM). **User-defined** — pick a long random string (32+ chars, alphanumeric). Entry refuses to start if unset. |
-| `AGENTHUB_ADMIN_TOKEN` | No | Admin API full token / Web console login password. **User-defined** — pick something memorable. If unset, admin UI binds to loopback only. |
-| `AGENTHUB_ADMIN_READONLY_TOKEN` | No | Read-only token (user-defined, different from full token): only read commands are allowed. |
-| `AGENTHUB_PROXY_PORT` / `AGENTHUB_HOST` | 9527 / 0.0.0.0 | Local gateway listen address. |
-| `AGENTHUB_ADMIN_PORT` | 9528 | Admin API port. |
+| `AGENTHUB_ADMIN_TOKEN` | Required for remote access | Admin API full token / Web console login password. **User-defined.** If unset the entry **forces the admin bind back to the container loopback** and prints a WARN (console unreachable, but the container still starts and HEALTHCHECK stays green); if you also set `AGENTHUB_ADMIN_PUBLIC=0.0.0.0` it **refuses to start**. |
+| `AGENTHUB_ADMIN_READONLY_TOKEN` | No | Read-only token (user-defined, different from full token): only read commands are allowed. Counts as a credential for the safety gate. |
+| `AGENTHUB_ADMIN_HOST` | 0.0.0.0 | Admin bind address **inside the container**. Leave it as is; the entry downgrades it to `127.0.0.1` when no token is set. |
+| `AGENTHUB_ADMIN_PUBLIC` | 127.0.0.1 | Address the admin plane is published on **on the host**: `127.0.0.1` = this machine only (default); `0.0.0.0` = all interfaces (raw port exposed — set a token first). |
+| `AGENTHUB_PROXY_PORT` / `AGENTHUB_HOST` | 19527 / 0.0.0.0 | Local gateway listen address. |
+| `AGENTHUB_ADMIN_PORT` | 19528 | Admin API port. |
+| `AGENTHUB_DATA_DIR_HOST` | `../gateway-data` | Host data directory (resolved relative to `gateway/`), mounted at `/data`. |
 | `TZ` | Asia/Shanghai | Business timezone (check-in and daily quota reset use local time). |
+
 
 > **Keys and tokens are user-defined**: you do not need `openssl` or any random generator. Pick a password you can remember (e.g. `MySecretKey2024` or `MyAdminPass-AgentHub`). The `.env` file is in `.gitignore` and will never be committed.
 
@@ -97,17 +113,23 @@ docker compose --env-file gateway/.env -f gateway/docker-compose.yml up -d --bui
 **Principle: desktop credentials are DPAPI-encrypted and the container cannot decrypt them — never share data volumes between the two forms. Accounts are transferred only via pool sync (WebDAV/S3).**
 
 1. **Recommended**: point the container at the same WebDAV/S3 as the desktop:
-   `PUT /api/config/webdav` writes the config and pool sync starts automatically (the passphrase envelope can be decrypted on both sides if `AGENTHUB_SECRET_KEY` is identical).
+   `PUT /api/config/webdav` persists the config; **the poolsync scheduler then picks it up**
+   (saving does not trigger an immediate sync in this build — "sync on save" ships with stage 3;
+   until then trigger `proxy_poolsync_run` to pull accounts right away).
+   **What makes the two forms interoperate is an identical WebDAV/S3 passphrase** on both sides
+   (passphrase envelope, magic `AHPPOOL1`, scrypt + AES-256-GCM). `AGENTHUB_SECRET_KEY` only
+   encrypts data **at rest inside the container** — it plays no part in cross-form decryption,
+   so the desktop works without it, and matching SECRET_KEYs still cannot open safeStorage blobs.
 2. Alternative: `POST /api/accounts/import` to import JSON (desktop export or hand-written credentials; metadata-only exports without tokens are rejected with a clear message).
 
-The desktop can also register the container as a "self-hosted OpenAI-compatible provider": `http://<container-host>:9527/v1` + an API key created inside the container (`localgw_keys_create` via admin RPC).
+The desktop can also register the container as a "self-hosted OpenAI-compatible provider": `http://<container-host>:19527/v1` + an API key created inside the container (`localgw_keys_create` via admin RPC).
 
 ### Admin API overview
 
-- `GET /api/livez` (always 200, for HEALTHCHECK) · `GET /api/readyz` (200 only when at least one account is online)
+- `GET /api/livez` (always 200, for HEALTHCHECK) · `GET /api/readyz` (200 only when at least one account is online; **an empty pool returning 503 is a legal state**)
 - `GET /api/status` · `GET /api/channels` · `GET /api/accounts` · `GET /api/models`
 - `GET/PUT /api/config` · `GET/PUT /api/config/webdav` · `GET /api/backup`
-- `GET /api/capabilities`: full command table with read/write/deny annotations (277 commands = proxy 66 + localgw 43 + prompts 43 + memory 125)
+- `GET /api/capabilities`: full command table with read/write/deny annotations. **Measured 290+ registered commands** (the count drifts with parallel work — observed 277→296→297 this round; per-module breakdown is whatever `gateway/src/commands.cjs` actually registers, and exact reconciliation belongs to gates T3/T4, not to this document). Several dozen more commands are unregistered yet explicitly DENIED (`skills_*` / `webdav_*` / `pet_*` / `window_*` …): their reasons ship with the response, but they are not keys of `commands`.
 - `POST /api/rpc/:cmd`: remote command channel, envelope identical to desktop IPC
 - `GET /api/events`: SSE event stream (proxy + localgw)
 
@@ -115,11 +137,12 @@ The desktop can also register the container as a "self-hosted OpenAI-compatible 
 
 ### Security baseline
 
-- If no admin token is set, the admin API binds to loopback only; put a TLS-terminating proxy in front for remote management
-- Token comparison uses constant-time comparison; read-only and full tokens are separate
+- **Admin safety gate (four states)**: no token + explicit public intent (`AGENTHUB_ADMIN_PUBLIC=0.0.0.0`) → **refuses to start**; no token + default → starts but the bind is **forced back to the container loopback** with a WARN (same behaviour as before the upgrade, zero breakage); with a token → binds `0.0.0.0` and the host prefix decides exposure. See the 「安全闸」 table in [`gateway/README.md`](gateway/README.md).
+- Put a TLS-terminating reverse proxy in front for remote management; token comparison is constant-time (both sides hashed to equal length first, so length leaks no timing); read-only and full tokens are separate
 - Single-instance lock: only one gateway process per data directory
-- Logs are redacted; `.dockerignore` excludes `*.db`, `.env`, `gateway-data/`
+- Logs are redacted; request body capped at 4mb; `.dockerignore` excludes `*.db`, `.env`, `gateway-data/`, `tools/`
 - Qoder dual-region requires a local WASM signer; it is disabled on first container start with a log note
+
 
 ### More docs
 
@@ -156,11 +179,11 @@ The desktop can also register the container as a "self-hosted OpenAI-compatible 
 
 ### The problem
 
-Usage is scattered across each tool's own local database, and nobody tells you what the month cost in total. Usage Stats reads **local client data files** directly, normalises 22 sources onto one schema, and gives you totals, trends, cost and cross-device comparison.
+Usage is scattered across each tool's own local database, and nobody tells you what the month cost in total. Usage Stats reads **local client data files** directly, normalises 23 sources onto one schema, and gives you totals, trends, cost and cross-device comparison.
 
-### Supported sources (21)
+### Supported sources (23)
 
-ZCode, SenseTime Raccoon, Xiaomi MiMo, Codex, DeepSeek Harness, WorkBuddy, WorkBuddy AI, Reasonix, CodeBuddy, Qoder, Qoder CN, Antigravity, Antigravity IDE, Antigravity legacy recovery, Trae, Trae CN, TRAE SOLO, TRAE SOLO CN, OpenSquilla, Grok, AutoClaw, Loomy.
+ZCode, SenseTime Raccoon, Xiaomi MiMo, Codex, DeepSeek Harness, WorkBuddy, WorkBuddy AI, Reasonix, CodeBuddy, Qoder, Qoder CN, Antigravity, Antigravity IDE, Antigravity legacy recovery, Trae, Trae CN, TRAE SOLO, TRAE SOLO CN, OpenSquilla, Grok, AutoClaw, Loomy, MiniMax Code.
 
 Under **Configure · Usage stats** you can toggle each source and point it at a custom data directory — sources you never installed are skipped silently.
 
@@ -537,9 +560,9 @@ This project is a hands-on project for learning **local credential management, m
 
 This project is **not affiliated with** the following companies or their products in any way, and has not received their authorisation, endorsement, sponsorship or backing:
 
-Tencent and WorkBuddy / CodeBuddy; ByteDance and Trae / TRAE SOLO; SenseTime and Raccoon; Zhipu and ZCode / AutoClaw / AutoGLM; Meituan and CatPaw; Alibaba and Qoder / ModelScope / Accio; Huawei Cloud and CodeArts; iFLYTEK and Loomy; NetEase Youdao and LobsterAI; Xiaomi and MiMo; DeepSeek and DeepSeek Harness; OpenAI and Codex; Google and Antigravity; Cline; and any other service provider mentioned in this document.
+Tencent and WorkBuddy / CodeBuddy; ByteDance and Trae / TRAE SOLO; SenseTime and Raccoon; Zhipu and ZCode / AutoClaw / AutoGLM; Meituan and CatPaw; Alibaba and Qoder / ModelScope / Accio / OpenSquilla; Huawei Cloud and CodeArts; iFLYTEK and Loomy; NetEase Youdao and LobsterAI; Baidu and KukuAI; Chaitin Security and Monkeycode; Xiaomi and MiMo; xAI and Grok; MiniMax; DeepSeek and DeepSeek Harness; OpenAI and Codex; Google and Antigravity; Cline; and any other service provider mentioned in the documentation, code or UI (including channels connected via custom base URLs).
 
-All product names, trademarks, service names and protocol names appearing here belong to their respective owners and are used only for identification and explanation, and do not imply any affiliation or authorisation.
+All product names, trademarks, service names and protocol names appearing here belong to their respective owners and are used only for identification and explanation, and do not imply any affiliation or authorisation. Model names appearing in catalogues and requests (Anthropic Claude, OpenAI GPT, Google Gemini, Zhipu GLM, Alibaba Qwen, Moonshot Kimi, DeepSeek, MiniMax, ByteDance Doubao, etc.) likewise belong to their respective owners. This project **does not include, redistribute or host any model** — it only forwards requests to the upstream tied to the user's own account or own upstream configuration.
 
 ### 2. Third-party accounts and platform rules
 
@@ -556,6 +579,8 @@ The author has **not retrieved or verified the original terms of each platform o
 You may not use this project for:
 
 - any commercial purpose, redistribution for profit, or selling accounts or quota with this project as the vehicle
+- packaging and selling the project or its derivatives, pay-walled mirrors, embedding advertising, or trading it for sponsorship or traffic share without the author's permission (the project's own donation and sponsorship channels excepted)
+- pointing update sources, installers or container images to self-hosted mirrors impersonating the official source
 - bulk account operation, buying or selling accounts, automated farming of rewards, account warming
 - bypassing upstream billing, quota, risk control or permission limits
 - attacking, scraping, scanning or disrupting the normal operation of any service
@@ -572,6 +597,7 @@ This project needs to read and write account credentials (accessToken / refreshT
 - Credentials are encrypted with Windows DPAPI before touching disk. Encrypted packages produced by pool sync and local backups contain recoverable credentials — keep them safe yourself. "Export selected accounts" in the Pool page exports metadata only (no tokens); do not mistake it for a credential file
 - Never commit exported credential files to a public repository, upload them to cloud storage, send them to a chat group or share them with others
 - If you bind the service to `0.0.0.0` (for LAN access), every device on the same network can reach it — assess the risk yourself and set per-key daily quotas and rate limits
+- Obtain updates and images only from the project's official distribution channels (GitHub Releases / this repository's GHCR registry); third-party mirrors may carry tampered content
 - "Switch to IDE" closes and rewrites the local client's login state; save your work first
 - In Docker form, the credential encryption key (`AGENTHUB_SECRET_KEY`) is the only way to decrypt stored credentials; losing it means losing access to all stored accounts
 - Any loss caused by credential leakage, someone else using your device, misconfiguration or a wrong operation **is borne solely by you, and the author accepts no responsibility**
@@ -588,19 +614,38 @@ This project is provided "AS IS", and the author **makes no express or implied w
 
 **The complete terms are in [LICENSE](./LICENSE).** If you disagree with any part of this section, stop using the project immediately and delete it and its related data.
 
+## Author
+
+**沐晖** (GitHub: [@HUIdada1](https://github.com/HUIdada1))
+
+## License
+
+This project is licensed under a **composite licence of [MIT License](./LICENSE) + additional terms of use**, and is **not a pure MIT project**:
+
+| Part | Content |
+| --- | --- |
+| Part 1 · MIT License | Grants the software-level rights to use, copy, modify, merge, publish, distribute, sublicense and sell |
+| Part 2 · Additional terms of use | Further restricts the use scenarios: no commercial use, no redistribution for profit, no bulk account operation, no bypassing upstream billing or quotas, no attacking or interference, no unlawful use |
+
+The two parts are **inseparable** and together form the complete licence and usage terms of this project; those who accept only one of them may not use, copy, modify or distribute this project in any form. Where the additional terms differ from the "Prohibited uses" section of the [Disclaimer](#disclaimer) above, the [LICENSE](./LICENSE) prevails.
+
+Commercial use requires prior written authorisation from the author. The complete terms (including the full MIT text) are in [LICENSE](./LICENSE).
+
+Copyright (c) 2026 沐晖 (HUIdada1)
+
 ---
 
 ## Full statement
 
-> This is the complete statement for using this project and is consistent with the [Disclaimer](#disclaimer) above; **where they differ, the [LICENSE](./LICENSE) prevails**.
+> This is the complete statement for using this project and is consistent with the [Disclaimer](#disclaimer) above; **where they differ, the Chinese version of this document and the [LICENSE](./LICENSE) prevail**.
 
 ### For learning and exchange only
 
 This project is a hands-on project for learning **local credential management, multi-upstream account and quota aggregation, a loopback gateway with SSE streaming pass-through, OpenAI / Anthropic protocol adaptation, cross-tool skill directory management and Electron desktop packaging**. It is for personal learning and research only. It is not an official product and is **not affiliated with** the following companies or their products in any way, and has not received their authorisation, endorsement or sponsorship:
 
-Tencent and WorkBuddy / CodeBuddy, ByteDance and Trae / TRAE SOLO, SenseTime and Raccoon, Zhipu and ZCode / AutoClaw / AutoGLM, Meituan and CatPaw, Alibaba and Qoder / ModelScope / Accio, Huawei Cloud and CodeArts, iFLYTEK and Loomy, NetEase Youdao and LobsterAI, Xiaomi and MiMo, DeepSeek and DeepSeek Harness, OpenAI and Codex, Google and Antigravity, Cline, and any other service provider mentioned in the documentation, code or UI.
+Tencent and WorkBuddy / CodeBuddy, ByteDance and Trae / TRAE SOLO, SenseTime and Raccoon, Zhipu and ZCode / AutoClaw / AutoGLM, Meituan and CatPaw, Alibaba and Qoder / ModelScope / Accio / OpenSquilla, Huawei Cloud and CodeArts, iFLYTEK and Loomy, NetEase Youdao and LobsterAI, Baidu and KukuAI, Chaitin Security and Monkeycode, Xiaomi and MiMo, xAI and Grok, MiniMax, DeepSeek and DeepSeek Harness, OpenAI and Codex, Google and Antigravity, Cline, and any other service provider mentioned in the documentation, code or UI.
 
-All product names, trademarks, service names and protocol names belong to their respective owners and are used only for identification and explanation.
+All product names, trademarks, service names and protocol names belong to their respective owners and are used only for identification and explanation. Model names appearing in catalogues and requests (Claude / GPT / Gemini / GLM / Qwen / Kimi / DeepSeek / MiniMax / Doubao, etc.) likewise belong to their respective owners: this project does not include, redistribute or host any model.
 
 ### About the Local Gateway behaviour
 
@@ -610,9 +655,13 @@ It does not crack or bypass any payment or permission check, and the quota used 
 
 ### Prohibited uses
 
-Do not use this project for any commercial purpose, redistribution for profit, selling accounts or quota with this project as the vehicle, bulk account operation, automated farming of rewards, account warming, bypassing upstream billing or quota limits, attacking or disrupting the normal operation of any service, or any other activity that violates local laws or upstream terms.
+Do not use this project for any commercial purpose, redistribution for profit, selling accounts or quota with this project as the vehicle, unauthorised packaging and resale or pay-walled mirroring, pointing update sources or installers to self-hosted mirrors impersonating the official source, trading the project for sponsorship or advertising and traffic share (the project's own donation and sponsorship channels excepted), bulk account operation, automated farming of rewards, account warming, bypassing upstream billing or quota limits, attacking or disrupting the normal operation of any service, or any other activity that violates local laws or upstream terms.
 
 If you need to call the relevant model services in production or commercially, use the **official channels and official APIs**.
+
+### Credential and data risks
+
+Credentials are encrypted with Windows DPAPI before touching disk; pool-sync packages and local backups contain recoverable credentials, and in Docker form `AGENTHUB_SECRET_KEY` is the only key to decrypt them — losing it means losing access to all stored accounts. Uninstalling does **not** delete the data directory (`%APPDATA%\AgentHub`, or the data volume in Docker form); delete it yourself before handing the machine or volume to someone else. Any loss caused by credential leakage, someone else using your device, misconfiguration or a wrong operation **is borne solely by the user**.
 
 ### No warranty and rights notice
 

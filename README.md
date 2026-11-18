@@ -14,9 +14,11 @@ AgentHub 是本地运行的中控台（Electron + Vue 3 + TypeScript），自身
 
 提供 **Windows 桌面版**（六个板块全功能，见 [Windows 版下载与安装](#windows-版下载与安装)）与 **Docker 版**（四模块 headless + Web 控制台，见 [Docker 版部署](#docker-版部署)）。**本地网关**把上游模型服务以 OpenAI / Anthropic 兼容端点暴露在本机回环地址上，上游按自定义提供商配置。
 
+**使用本项目前，请先完整阅读 [使用声明](#使用声明) 与 [声明（完整版）](#声明完整版)。**
+
 | 板块 | 一句话 | 适合谁 |
 | --- | --- | --- |
-| **用量统计** | 汇总 22 个数据源的 token 用量与费用，按天 / 项目 / 模型看趋势 | 想知道这个月到底烧了多少的人 |
+| **用量统计** | 汇总 23 个数据源的 token 用量与费用，按天 / 项目 / 模型看趋势 | 想知道这个月到底烧了多少的人 |
 | **记忆中枢** | 本地 Markdown 记忆库 + MCP 服务，让 Agent 记住项目和偏好 | 不想每次开新会话都重新交代背景的人 |
 | **提示词库** | 把一句话扩写成规范提示词，好用的存起来复用，另有 60 条精选目录 | 反复重写同一段提示词、或不知道该怎么把需求说清楚的人 |
 | **号池管家** | 把各渠道的账号收进一个号池，集中看余额、管签到、跨设备同步 | 手里有多渠道订阅额度（Trae / WorkBuddy / 小浣熊 / 魔搭 / ZCode / Qoder / Cline 等 21 个渠道）、想知道余额还剩多少的人 |
@@ -51,6 +53,8 @@ AgentHub 是本地运行的中控台（Electron + Vue 3 + TypeScript），自身
 - [常见问题](#常见问题)
 - [开发与自测](#开发与自测)
 - [使用声明](#使用声明)
+- [作者](#作者)
+- [License](#license)
 - [声明（完整版）](#声明完整版)
 
 ---
@@ -70,25 +74,36 @@ cd AgentHub
 cp gateway/.env.example gateway/.env
 # 编辑 gateway/.env，填入你自己定义的密钥与令牌：
 #   AGENTHUB_SECRET_KEY=你的凭据加密密钥（自定义，建议 32+ 字符）
-#   AGENTHUB_ADMIN_TOKEN=你的管理密码（自定义，好记即可）
+#   AGENTHUB_ADMIN_TOKEN=你的管理密码（自定义，好记即可；远程访问必填）
 
-# ③ 启动
+# ③ 准备数据目录（属主必须是 uid 1000：容器以 USER node 运行）
+mkdir -p gateway-data && sudo chown 1000:1000 gateway-data
+
+# ④ 启动
 docker compose --env-file gateway/.env -f gateway/docker-compose.yml up -d --build
 ```
 
-- 网关：`http://<主机>:9527/v1`（OpenAI / Anthropic / Responses 三协议兼容）
-- 管理：`http://127.0.0.1:9528/api`（默认只绑宿主本机）
-- Web 控制台：`http://<主机>:9528/`（输入 `AGENTHUB_ADMIN_TOKEN` 登录）
+- 网关：`http://<主机>:19527/v1`（OpenAI / Anthropic / Responses 三协议兼容）
+- 管理：`http://127.0.0.1:19528/api`（默认只绑宿主本机）
+- Web 控制台：`http://127.0.0.1:19528/`（输入 `AGENTHUB_ADMIN_TOKEN` 登录）
+
+> 端口是 **19527 / 19528** 而不是 9527 / 9528：桌面版把本地网关默认占在 `9527/127.0.0.1`，
+> 容器若沿用会同机冲突，且冲突表现为"桌面版网关起不来"。老部署退回旧端口只需在
+> `gateway/.env` 显式写 `AGENTHUB_PROXY_PORT=9527` / `AGENTHUB_ADMIN_PORT=9528` 一次。
+
 
 ### 环境变量说明
 
 | 变量 | 必填 | 说明 |
 | --- | --- | --- |
 | `AGENTHUB_SECRET_KEY` | ✅ | 凭据加密密钥（enc:v2 AES-256-GCM），**自定义一个足够长的随机字符串**（建议 32+ 字符，字母数字混合）；未设置时入口拒绝启动 |
-| `AGENTHUB_ADMIN_TOKEN` | 可选 | 管理 API 完整令牌 / Web 控制台登录密码，**自定义一个好记的密码**；未设置时管理面只绑回环 |
-| `AGENTHUB_ADMIN_READONLY_TOKEN` | 可选 | 只读令牌（自定义，与完整令牌不同）：只放行监视类命令 |
-| `AGENTHUB_PROXY_PORT` / `AGENTHUB_HOST` | 默认 9527 / 0.0.0.0 | 本地网关监听参数 |
-| `AGENTHUB_ADMIN_PORT` | 默认 9528 | 管理 API 端口 |
+| `AGENTHUB_ADMIN_TOKEN` | 远程访问必填 | 管理 API 完整令牌 / Web 控制台登录密码，**自定义一个好记的密码**。不设时入口把管理面**强制降回容器回环**并打 WARN（管理面打不开，但容器照常启动、HEALTHCHECK 不受影响）；若同时显式设了 `AGENTHUB_ADMIN_PUBLIC=0.0.0.0` 则**拒绝启动** |
+| `AGENTHUB_ADMIN_READONLY_TOKEN` | 可选 | 只读令牌（自定义，与完整令牌不同）：只放行监视类命令；设了它也算"已有凭据" |
+| `AGENTHUB_ADMIN_HOST` | 默认 0.0.0.0 | **容器内**管理面绑定地址。保持默认即可；无 token 时入口会把它降回 `127.0.0.1` |
+| `AGENTHUB_ADMIN_PUBLIC` | 默认 127.0.0.1 | 管理面在**宿主机**上的发布地址：`127.0.0.1` 只本机可达；`0.0.0.0` 直接发布到所有网卡（裸端口暴露，务必已设 token） |
+| `AGENTHUB_PROXY_PORT` / `AGENTHUB_HOST` | 默认 19527 / 0.0.0.0 | 本地网关监听参数 |
+| `AGENTHUB_ADMIN_PORT` | 默认 19528 | 管理 API 端口 |
+| `AGENTHUB_DATA_DIR_HOST` | 默认 `../gateway-data` | 宿主数据目录（相对 `gateway/` 解析），容器内挂到 `/data` |
 | `TZ` | 默认 Asia/Shanghai | 业务时区 |
 
 > **密钥与令牌都是用户自定义的**：不需要会 `openssl`，选一个你自己记得住的密码即可（比如 `MySecretKey2024` 或 `MyAdminPass-AgentHub`）。`.env` 文件已在 `.gitignore` 中，不会提交到仓库。
@@ -98,17 +113,25 @@ docker compose --env-file gateway/.env -f gateway/docker-compose.yml up -d --bui
 **原则：桌面凭据是 safeStorage(DPAPI) 密文，容器解不开——两形态绝不共享数据卷，传号只走号池同步（WebDAV/S3）。**
 
 1. **推荐**：容器配与桌面版同一个 WebDAV/S3：
-   `PUT /api/config/webdav` 写入后号池自动同步（口令信封通道，两边 `AGENTHUB_SECRET_KEY` 相同即可互相解开）。
+   `PUT /api/config/webdav` 写入后由 **poolsync 调度器接管**（本版本保存**不会**立刻跑一次同步，
+   "保存即同步"属总纲阶段 3；要马上拉号请手动触发 `proxy_poolsync_run`）。
+   **互通的前提是两侧的 WebDAV/S3 口令一致**（口令信封 magic `AHPPOOL1`，scrypt + AES-256-GCM）。
+   `AGENTHUB_SECRET_KEY` **只管容器内落盘加密，不参与两形态互解**——桌面版不设它照样能互联，两侧
+   SECRET_KEY 相同也解不开对方的 safeStorage 密文。
 2. 备选：`POST /api/accounts/import` 导入 JSON（桌面版导出的快照或手工凭据；元数据包不含 token 会被明确拒绝并提示）。
 
-桌面版反过来可把容器实例配为「自建 OpenAI 兼容端点」provider：`http://<容器主机>:9527/v1` + 容器里创建的 API Key（`localgw_keys_create` 经管理 RPC）。
+桌面版反过来可把容器实例配为「自建 OpenAI 兼容端点」provider：`http://<容器主机>:19527/v1` + 容器里创建的 API Key（`localgw_keys_create` 经管理 RPC）。
+
 
 ### 管理 API 一览
 
 - `GET /api/livez`（恒 200，HEALTHCHECK 用）· `GET /api/readyz`（有在线账号才 200）
 - `GET /api/status` · `GET /api/channels` · `GET /api/accounts` · `GET /api/models`
 - `GET/PUT /api/config` · `GET/PUT /api/config/webdav` · `GET /api/backup`
-- `GET /api/capabilities`：完整命令表与 read/write/deny 标注（277 条 = proxy 66 + localgw 43 + prompts 43 + memory 125）
+- `GET /api/capabilities`：完整命令表与 read/write/deny 标注。**实测 290+ 条已注册命令**
+  （数量随并行开发漂移，本轮观察到 277→296→297；分项以 `gateway/src/commands.cjs` 实际注册为准，
+  精确对账归门禁 T3/T4，文档不锁死具体数字）。另有数十条"未注册但显式 DENY"的命令
+  （`skills_*` / `webdav_*` / `pet_*` / `window_*` 等），拒绝文案已下发但不在 `commands` 的键里
 - `POST /api/rpc/:cmd`：远程命令通道，信封与桌面 IPC 完全一致
 - `GET /api/events`：SSE 事件流（proxy + localgw）
 
@@ -116,11 +139,14 @@ docker compose --env-file gateway/.env -f gateway/docker-compose.yml up -d --bui
 
 ### 安全基线
 
-- 管理面未设 token 时只绑回环；远程管理请前置带 TLS 的代理
-- token 校验恒定时间比较；只读令牌与完整令牌分离
+- **管理面安全闸（四态）**：无 token + 显式要公网（`AGENTHUB_ADMIN_PUBLIC=0.0.0.0`）→ 拒绝启动；
+  无 token + 默认 → 启动但绑定强制降回容器回环 + WARN（老部署升级零破坏）；有 token → 正常绑
+  `0.0.0.0` 由宿主前缀决定暴露面。详见 [`gateway/README.md`](gateway/README.md) 的「安全闸」表
+- 远程管理请前置带 TLS 的代理；token 校验恒定时间比较；只读令牌与完整令牌分离
 - 单实例锁：同一数据目录只允许一个网关进程
 - 日志全走 redact；`.dockerignore` 排除 `*.db`、`.env`、`gateway-data/`
 - qoder 双区需要本机 wasm 签名，容器里首启自动关闭并记日志
+
 
 ### 更多文档
 
@@ -157,11 +183,11 @@ docker compose --env-file gateway/.env -f gateway/docker-compose.yml up -d --bui
 
 ### 它解决什么问题
 
-用量散在各家工具自己的本地库里，没人告诉你这个月一共花了多少。用量统计直接读**本机客户端的数据文件**，把 22 个数据源归一到同一套口径，做汇总、趋势、费用和跨设备对比。
+用量散在各家工具自己的本地库里，没人告诉你这个月一共花了多少。用量统计直接读**本机客户端的数据文件**，把 23 个数据源归一到同一套口径，做汇总、趋势、费用和跨设备对比。
 
-### 支持的数据源（22 个）
+### 支持的数据源（23 个）
 
-ZCode、商汤小浣熊、Xiaomi MiMo、Codex、DeepSeek Harness、WorkBuddy、WorkBuddy AI、Reasonix、CodeBuddy、Qoder、Qoder CN、Antigravity、Antigravity IDE、Antigravity 老数据恢复、Trae、Trae CN、TRAE SOLO、TRAE SOLO CN、OpenSquilla、Grok、AutoClaw、Loomy。
+ZCode、商汤小浣熊、Xiaomi MiMo、Codex、DeepSeek Harness、WorkBuddy、WorkBuddy AI、Reasonix、CodeBuddy、Qoder、Qoder CN、Antigravity、Antigravity IDE、Antigravity 老数据恢复、Trae、Trae CN、TRAE SOLO、TRAE SOLO CN、OpenSquilla、Grok、AutoClaw、Loomy、MiniMax Code。
 
 在「配置 · 用量统计」里可以逐个开关、指定自定义数据目录——没装过的源自动跳过，不会报错。
 
@@ -612,9 +638,9 @@ src/                 渲染层（Vue 3）
 
 本项目与下列公司及其产品**均无任何关联**，未获得其授权、认可、赞助或背书：
 
-腾讯及 WorkBuddy / CodeBuddy、字节跳动及 Trae / TRAE SOLO、商汤科技及小浣熊、智谱及 ZCode / AutoClaw / AutoGLM、美团及 CatPaw、阿里巴巴及 Qoder / ModelScope（魔搭）/ Accio、华为云及 CodeArts、科大讯飞及 Loomy、网易有道及 LobsterAI、小米及 MiMo、DeepSeek 及 DeepSeek Harness、OpenAI 及 Codex、Google 及 Antigravity、Cline，以及其他文中提及的服务提供方。
+腾讯及 WorkBuddy / CodeBuddy、字节跳动及 Trae / TRAE SOLO、商汤科技及小浣熊、智谱及 ZCode / AutoClaw / AutoGLM、美团及 CatPaw、阿里巴巴及 Qoder / ModelScope（魔搭）/ Accio / OpenSquilla、华为云及 CodeArts、科大讯飞及 Loomy、网易有道及 LobsterAI、百度及 KukuAI（库库 AI）、长亭科技及 Monkeycode、小米及 MiMo、xAI 及 Grok、MiniMax、DeepSeek 及 DeepSeek Harness、OpenAI 及 Codex、Google 及 Antigravity、Cline，以及其他在文档、代码或界面中提及的服务提供方（含按自定义基址接入的渠道）。
 
-文中出现的所有产品名、商标、服务名、协议名均归其各自所有者，仅用于标识与说明用途，不构成任何形式的关联或授权。
+文中出现的所有产品名、商标、服务名、协议名均归其各自所有者，仅用于标识与说明用途，不构成任何形式的关联或授权。目录与请求中出现的模型名称（Anthropic Claude、OpenAI GPT、Google Gemini、智谱 GLM、通义千问 Qwen、月之暗面 Kimi、DeepSeek、MiniMax、豆包 Doubao 等）同样归其各自所有者。本项目**不包含、不重新分发、也不托管任何模型**，只把请求转发到使用者自己账号或自己配置的上游。
 
 ### 二、关于第三方账号与平台规则
 
@@ -631,6 +657,8 @@ src/                 渲染层（Vue 3）
 禁止将本项目用于：
 
 - 任何商业用途、二次分发牟利、以本项目为载体售卖账号或额度
+- 未经作者许可，把本项目或其衍生版打包售卖、付费镜像、投放广告，或以本项目换取赞助与流量分成（本项目官方赞赏与赞助渠道除外）
+- 把更新源、安装包或容器镜像指向自建站点冒充官方源
 - 批量账号运营、账号买卖、代刷代领、养号
 - 绕过上游计费、配额、风控或权限限制
 - 攻击、爬取、扫描或干扰任何服务的正常运行
@@ -647,6 +675,8 @@ src/                 渲染层（Vue 3）
 - 凭据在本机经 Windows DPAPI 加密后落盘；号池同步生成的加密包与本机备份包含可还原的凭据，请自行妥善保管。号池页「导出选中账号」仅导出元数据（不含 token），不要误当成凭据文件
 - 切勿将导出的凭据文件提交到公开仓库、上传到网盘、发送到聊天群或分享给他人
 - 若将服务绑定到 `0.0.0.0`（供局域网访问），同网段设备均可访问，请自行评估风险并设置 Key 的日配额与限速
+- Docker 版中 `AGENTHUB_SECRET_KEY` 是解密已存凭据的唯一钥匙，丢失即无法取回所有已存账号
+- 请只从本项目官方发布渠道（GitHub Releases / 本仓库 GHCR 镜像）获取更新与镜像，第三方镜像站可能携带篡改内容
 - 「切到 IDE」会关闭并重新写入本机客户端登录态，操作前请自行保存工作内容
 - 因凭证泄露、设备被他人使用、配置不当或误操作造成的任何损失，**由使用者自行承担，作者不承担任何责任**
 - 卸载程序**不会删除** `%APPDATA%\AgentHub`，如需彻底清除请自行删除该目录
@@ -691,9 +721,9 @@ Copyright (c) 2026 沐晖 (HUIdada1)
 
 本项目是一个用于学习 **本地凭据管理、多上游账号与额度聚合、本机回环网关与 SSE 流式透传、OpenAI / Anthropic 协议适配、跨工具技能目录管理与 Electron 桌面端打包** 等技术主题的实践项目，仅供个人学习与研究使用。它不是官方产品，与下列公司及其产品**均无任何关联**，未获得其授权、认可或赞助：
 
-腾讯及 WorkBuddy / CodeBuddy，字节跳动及 Trae / TRAE SOLO，商汤科技及小浣熊，智谱及 ZCode / AutoClaw / AutoGLM，美团及 CatPaw，阿里巴巴及 Qoder / ModelScope（魔搭）/ Accio，华为云及 CodeArts，科大讯飞及 Loomy，网易有道及 LobsterAI，小米及 MiMo，DeepSeek 及 DeepSeek Harness，OpenAI 及 Codex，Google 及 Antigravity，Cline，以及其他在文档、代码或界面中提及的服务提供方。
+腾讯及 WorkBuddy / CodeBuddy，字节跳动及 Trae / TRAE SOLO，商汤科技及小浣熊，智谱及 ZCode / AutoClaw / AutoGLM，美团及 CatPaw，阿里巴巴及 Qoder / ModelScope（魔搭）/ Accio / OpenSquilla，华为云及 CodeArts，科大讯飞及 Loomy，网易有道及 LobsterAI，百度及 KukuAI（库库 AI），长亭科技及 Monkeycode，小米及 MiMo，xAI 及 Grok，MiniMax，DeepSeek 及 DeepSeek Harness，OpenAI 及 Codex，Google 及 Antigravity，Cline，以及其他在文档、代码或界面中提及的服务提供方。
 
-文中出现的所有产品名、商标、服务名、协议名均归其各自所有者，仅用于标识与说明用途。
+文中出现的所有产品名、商标、服务名、协议名均归其各自所有者，仅用于标识与说明用途。目录与请求中出现的模型名称（Claude / GPT / Gemini / GLM / Qwen / Kimi / DeepSeek / MiniMax / 豆包 等）亦归其各自所有者：本项目不包含、不重新分发、也不托管任何模型。
 
 ### 关于本地网关行为
 
@@ -703,9 +733,13 @@ Copyright (c) 2026 沐晖 (HUIdada1)
 
 ### 禁止用途
 
-禁止将本项目用于任何商业用途、二次分发牟利、以本项目为载体售卖账号或额度、批量账号运营、代刷代领、养号、绕过上游计费或配额限制、攻击或干扰任何服务的正常运行，以及其他违反当地法律法规或上游服务条款的活动。
+禁止将本项目用于任何商业用途、二次分发牟利、以本项目为载体售卖账号或额度、未经许可的打包售卖与付费镜像、把更新源或安装包指向自建站点冒充官方源、以本项目换取赞助或广告与流量分成（本项目官方赞赏与赞助渠道除外）、批量账号运营、代刷代领、养号、绕过上游计费或配额限制、攻击或干扰任何服务的正常运行，以及其他违反当地法律法规或上游服务条款的活动。
 
 如需在生产环境或商业场景中调用相关模型服务，请使用**官方渠道与官方 API**。
+
+### 凭证与数据风险
+
+凭据在本机经 Windows DPAPI 加密后落盘；号池同步生成的加密包与本机备份包含可还原的凭据，Docker 版中 `AGENTHUB_SECRET_KEY` 是解密它们的唯一钥匙，丢失即无法取回已存账号。卸载程序**不会删除** `%APPDATA%\AgentHub`（Docker 版对应数据卷），转交他人或公开机器前请自行删除；因凭据泄露、设备被他人使用、配置不当或误操作造成的任何损失，**由使用者自行承担，作者不承担任何责任**。
 
 ### 无担保与权利通知
 

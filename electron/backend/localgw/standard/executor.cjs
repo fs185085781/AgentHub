@@ -1,5 +1,5 @@
 "use strict";
-const { makeOpenaiCompat } = require("./openai-compat.cjs");
+const { makeAdapter } = require("./factory.cjs");
 const transport = require("../../proxy/transport-context.cjs");
 const { hasContent } = require("../../extensions/provider-protocol.cjs");
 const { authority } = require("../../extensions/authority-watch.cjs");
@@ -15,12 +15,12 @@ function classify(error) {
     switchable: status !== 400 && status !== 413, resetMs: error?.retryAfterMs > 0 ? Date.now() + error.retryAfterMs : 0 };
 }
 
-async function executeStandard({ provider, pool, store, model, input, signal, onEvent, authorize, excludeAccounts = [], probe = false, onFailure, attemptLedger, deadlineAt = null }) {
+async function executeStandard({ provider, pool, store, model, input, signal, onEvent, authorize, excludeAccounts = [], probe = false, onFailure, attemptLedger, deadlineAt = null, pinAccountId = "" }) {
   if (authorize() !== true) throw Object.assign(new Error("执行来源未授权"), { status: 403 });
   signal?.throwIfAborted();
   attemptLedger?.assertAvailable();
   const account = probe ? pool.accountPlan(provider.id, undefined, excludeAccounts, 0, model).find(row => row.eligible)?.account
-    : pool.pickAccount(provider.id, undefined, excludeAccounts, 0, model);
+    : pool.pickAccount(provider.id, undefined, excludeAccounts, 0, model, pinAccountId);
   if (!account) return { ok: false, status: 503, errCode: "no_account", error: "渠道当前无可用账号", switchable: true, events: [] };
   let leased = false, committed = false, firstAt = 0, usage, finish, releaseAuthority, attemptScope, reservation;
   const ownsLedger = !attemptLedger;
@@ -42,7 +42,8 @@ async function executeStandard({ provider, pool, store, model, input, signal, on
     signal.throwIfAborted();
     const secrets = live && store.accountSecrets(live);
     if (!secrets?.token) throw Object.assign(new Error("账号凭据缺失"), { status: 401 });
-    const adapter = makeOpenaiCompat(provider);
+    // 协议档按 provider.kind 分派（openai_compat / anthropic_messages / openai_responses）
+    const adapter = makeAdapter(provider);
     attemptScope = ledger.open({ invocationId: randomUUID(), accountId: account.id, connection: `standard:${provider.id}`, authorize });
     reservation = attemptScope.reserve("initial");
     attemptScope.start(reservation.attemptId);

@@ -90,6 +90,30 @@ export type Overview = {
 
 export type ReportRow = { file: string; path: string; mtimeMs: number };
 
+export interface DailyCheckChannelDetail {
+  id: string;
+  name: string;
+  enabled: boolean;
+  hit: boolean;
+  dir: string;
+  skillCount: number;
+}
+
+export interface DailyCheckResult {
+  checkedAt: number;
+  ok: boolean;
+  totalTargets: number;
+  activeTargets: number;
+  skillCount: number;
+  brokenMounts: number;
+  repairedMounts: number;
+  orphans: number;
+  conflicts: number;
+  hubExtra?: number;
+  summary: string;
+  channelDetails: DailyCheckChannelDetail[];
+}
+
 export type SyncAction = {
   type: "import" | "mount" | "skip" | "error" | "conflict";
   skill: string;
@@ -232,7 +256,7 @@ export type WebDavEvent = { event: "webdav"; stage: string; detail: string; pct?
 export type SettingsTab = "general" | "pet" | "webdav" | "data" | "models" | "timing" | "feedback" | "update" | "plugins";
 
 export const SETTINGS_TABS: { key: SettingsTab; name: string; icon: string; desc: string }[] = [
-  { key: "general", name: "通用", icon: "ph-sliders-horizontal", desc: "外观 · 模块顺序 · 关于" },
+  { key: "general", name: "通用", icon: "ph-sliders-horizontal", desc: "" },
   // 桌宠组件：**暂时隐藏**（2026-11-09，用户要求）。
   // 代码与配置一律保留（electron/pet/ 整目录 + config.pet 段 + ConfigPetSection.vue 都没动），
   // 恢复时只需：① 取消下面一行注释；② 恢复 electron/main.cjs 里的 pet.boot 调用。
@@ -240,14 +264,14 @@ export const SETTINGS_TABS: { key: SettingsTab; name: string; icon: string; desc
   // 只是没有入口 —— 容器版那边一直是 PET_DENY（无图形环境）。
   // { key: "pet", name: "桌宠组件", icon: "ph-planet", desc: "卡冈图雅 · 黑洞特效 · 右键功能" },
   { key: "webdav", name: "WebDAV 同步", icon: "ph-cloud", desc: "统一服务器 · 号池同步" },
-  { key: "timing", name: "同步时间", icon: "ph-clock-countdown", desc: "各板块自动同步 / 刷新周期" },
-  { key: "data", name: "数据与备份", icon: "ph-database", desc: "备份压缩包 · 缓存目录" },
+  { key: "timing", name: "同步时间", icon: "ph-clock-countdown", desc: "" },
+  { key: "data", name: "数据与备份", icon: "ph-database", desc: "" },
   // 模型与网关：平台级配置（供应商 / 模型池 / 来源优先级 / 网关），
   // 记忆中枢只是当前消费方之一，未来新增板块统一复用这里
   { key: "models", name: "模型与网关", icon: "ph-cpu", desc: "供应商 · 模型池 · 来源优先级" },
-  { key: "feedback", name: "反馈与需求", icon: "ph-chat-circle-dots", desc: "问题反馈 · 功能建议" },
+  { key: "feedback", name: "反馈与需求", icon: "ph-chat-circle-dots", desc: "" },
   // 检查更新：软件更新独立成页（原在「通用」内），更新通知 / 托盘跳转落点同步到这里
-  { key: "update", name: "检查更新", icon: "ph-arrow-clockwise", desc: "软件更新 · 自动检查" },
+  { key: "update", name: "检查更新", icon: "ph-arrow-clockwise", desc: "" },
 ];
 
 // ===== 应用配置：框架（主题 / 模块顺序）+ 技能仓库 + 更新 =====
@@ -301,6 +325,12 @@ export interface AppConfig {
     daily: boolean;
     dailyTime: string;
     notifyOnSuccess: boolean;
+    /** 技能仓库：每日全自动检测各渠道健康与技能变更 */
+    dailyCheck?: boolean;
+    /** 每日自动检测时刻（如 "09:00"） */
+    dailyCheckTime?: string;
+    /** 检测时自动修复失效挂载与无冲突自动纳管 */
+    dailyCheckAutoMount?: boolean;
   };
   watch: { enabled: boolean; intervalSeconds: number };
   /** 反代网关设置（框架整体设置的一部分；端口改动需重启监听，其余热生效） */
@@ -400,9 +430,10 @@ export interface LocalgwModelGroupMember {
 
 /** 模型组：对外名 → 多成员候选。
  *  priority = 按 members 顺序取第一个可用（失败自动换下一个）；
- *  round-robin = 在可用成员间轮转，用来把请求摊到多个渠道/账号。 */
+ *  round-robin = 在可用成员间轮转，用来把请求摊到多个渠道/账号；
+ *  credit = 跨渠道积分优先：免费 → 快到期 → 晚到期 → 永久/未知（同档同到期按 members 顺序兜底）。 */
 export interface LocalgwModelGroup {
-  strategy: "priority" | "round-robin";
+  strategy: "priority" | "round-robin" | "credit";
   members: LocalgwModelGroupMember[];
 }
 
@@ -435,7 +466,7 @@ export interface LocalgwConfig {
   };
   /** 渠道路由 */
   routing: {
-    strategy: "smart" | "fixed" | "round-robin" | "score" | "cost-first";
+    strategy: "smart" | "fixed" | "round-robin" | "score" | "cost-first" | "credit-first";
     fixedChannel: string;
     failover: boolean;
     cooldownMs: number;
@@ -932,6 +963,28 @@ export interface ProxyCreditPackage {
   expiringSoon?: boolean;
 }
 
+/** 订阅 plan 的单个配额窗口（**百分比口径**，与 credit_packages 的可求和金额是两套账）。
+ *  MiniMax 实测 quotaType：1=5 小时窗、2=周窗、3=模型维度窗（客户端另有视频窗，上游未下发时不出）。 */
+export interface ProxyPlanWindow {
+  quotaType: number;
+  /** 窗口总量百分比（通常 100；模型维度窗折成百分比后也是 100） */
+  totalPct: number;
+  /** 已用百分比 */
+  usedPct: number;
+  /** 本窗口重置时刻（毫秒）；0 = 上游未给 */
+  resetAt: number;
+  /** 上游标记不限量（status === 3） */
+  isUnlimited: boolean;
+}
+
+/** 账号级 plan 状态：plan=窗口有余 / credit=窗口满但积分可接 /
+ *  exhausted=两者皆无 / absent=上游明确无订阅 / unknown=查询成功但字段缺失 */
+export interface ProxyPlanSnapshot {
+  state: "plan" | "credit" | "exhausted" | "absent" | "unknown";
+  computedAt: number;
+  windows: ProxyPlanWindow[];
+}
+
 export interface ProxyAccount {
   id: string;
   channel: ProxyChannelId;
@@ -951,6 +1004,8 @@ export interface ProxyAccount {
   modelCool?: { model: string; until: number; reason: string }[];
   /** 逐包明细（有包的渠道才有；无包的渠道这个字段不出，界面回落账号级聚合行） */
   packages?: ProxyCreditPackage[];
+  /** 订阅 plan 窗口（百分比口径，与 packages 金额口径分开；无配额概念的渠道为 null） */
+  plan?: ProxyPlanSnapshot | null;
   source: "scan" | "oauth" | "paste";
   /** 账号备注（备注弹窗写入；落 meta.note，副行展示 + 随 WebDAV 同步） */
   note?: string;
@@ -1014,9 +1069,8 @@ export interface ProxyChannelView {
 // ===== 自定义提供商（中转站 / 自建 OpenAI 兼容端点） =====
 
 /** 提供商的上游协议形态。值集合与后端 provider.cjs 的 KINDS 同源，漂移由
- *  scripts/test-provider-ui.cjs 断言守住。这一版只做 OpenAI Chat 一种：另两种形态需要
- *  入站协议面与出站互转模块，随后续 PR 进来。 */
-export type ProxyProviderKind = "openai_compat";
+ *  scripts/test-provider-ui.cjs 断言守住（该脚本按本行正则取词，必须单行、双引号、分号结尾）。 */
+export type ProxyProviderKind = "openai_compat" | "anthropic_messages" | "openai_responses";
 /** 渠道 kind：内置生态渠道（builtin）或自建提供商的协议形态 */
 export type ProxyChannelKind = "builtin" | ProxyProviderKind;
 
@@ -1058,6 +1112,8 @@ export interface ProxyProvider {
   display: string;
   domain?: string;
   kind: ProxyChannelKind;
+  /** 鉴权头风格：'' = 自动（Anthropic 档只有 api.anthropic.com 用 x-api-key，其余 Bearer） */
+  auth?: "" | "bearer" | "x-api-key";
   enabled: boolean;
   baseUrl: string;
   models: ProxyProviderModel[];
@@ -1068,6 +1124,26 @@ export interface ProxyProvider {
   onlineCount?: number;
   /** Key 管理的数据源：号池视图只按内置渠道迭代、不含提供商，列表顺带把脱敏运行态带回来 */
   keys?: ProxyProviderKey[];
+}
+
+/** 预设渠道（后端 provider-presets.cjs 的精简视图）。模型清单留在主进程（307 条太大），
+ *  这里只有数量；创建时传 `preset` 由后端补全。`id` 同时是路由前缀。 */
+export interface ProviderPreset {
+  id: string;
+  display: string;
+  /** 图标 key，对应 src/views/proxy/providerIcons.ts 的 PROVIDER_LOGOS */
+  brand: string;
+  /** 厂商分组，如 "zhipu" */
+  group: string;
+  kind: ProxyProviderKind;
+  baseUrl: string;
+  auth: "" | "bearer" | "x-api-key";
+  /** 去厂商控制台拿 Key 的地址，可能为空 */
+  apiKeyUrl: string;
+  /** 一句话提示，可能为空 */
+  note: string;
+  /** 预置模型数量（模型清单本身在主进程，创建时按 preset 补全） */
+  modelCount: number;
 }
 
 export interface ProxyProviderTestResult {
@@ -1680,6 +1756,7 @@ export const MODULES: ModuleDef[] = [
       { id: "auto", name: "自动化" },
       { id: "import", name: "导入与去重" },
       { id: "sync", name: "WebDAV同步" },
+      { id: "logic", name: "记忆逻辑说明" },
     ],
   },
   {

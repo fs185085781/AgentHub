@@ -11,7 +11,7 @@
 // IPC 封装：Electron 环境下通过 preload 桥接调用主进程；浏览器环境（npm run dev:web 预览 UI）
 // 回退到本地 mock。命令清单与 electron/preload.cjs 白名单、backend/ipc.cjs 一一对应
 import type {
-  AppConfig, SkillRow, SkillDetail, Overview, SyncPlan, SyncResult, ConflictItem, ConflictDiff,
+  AppConfig, SkillRow, SkillDetail, Overview, DailyCheckResult, SyncPlan, SyncResult, ConflictItem, ConflictDiff,
   ReportRow, ToolRow, TrashRow, UpdateStatus, ProbeRow, RemoveToolPlan,
   WebDavStatus, RemoteDevice, WebDavLog, HubExtraRow, WatchStatus,
   ProxyGatewayStatus, ProxyKeyRow, ProxyChannelView, ProxyAccount, ProxyStatsOverview, ProxyStatsDetail,
@@ -20,6 +20,7 @@ import type {
   ProxyCheckinRow, CcSwitchStatus, CcSwitchRegisterResult, CcSwitchAppType, ZcodeDeviceStatusResult, ZcodeClaimModeResult,
   CheckinCenterSnapshot, CheckinOnboardingResult, CheckinPlansPreview, CheckinPlansClaimResult, ProxyCheckinHistoryRow,
   ProxyProvider, ProxyProviderKind, ProxyProviderModel, ProxyProviderModelRow, ProxyProviderTestResult,
+  ProviderPreset,
   ProxyOpLogList,
   ProxyNetProxyList, ProxyNetProxyItem, ProxyNetProxyTest, ProxyNetProxyMode,
   ProxyNetProxyClashOptions, ProxyNetProxyClashSyncResult,
@@ -35,12 +36,13 @@ import type {
 } from "../types";
 
 export type {
-  AppConfig, SkillRow, SkillDetail, Overview, SyncPlan, SyncResult, ConflictItem, ConflictDiff,
+  AppConfig, SkillRow, SkillDetail, Overview, DailyCheckResult, SyncPlan, SyncResult, ConflictItem, ConflictDiff,
   ReportRow, ToolRow, TrashRow, UpdateStatus, UpdateEvent, ProbeRow, RemoveToolPlan,
   WebDavStatus, RemoteDevice, WebDavLog, WebDavEvent, HubExtraRow, WatchStatus,
   ProxyGatewayStatus, ProxyKeyRow, ProxyChannelView, ProxyAccount, ProxyStatsOverview, ProxyStatsDetail,
   ProxyStatsDim, ProxyStatsAggRow, ProxyStatsKeyRow,
   ProxyUsageRow, ProxyModel, ProxyScanCandidate, ProxyRuleFile, ProxyRoute, ProxyChannelId, ProxyPoolStrategy, ProxyCostTier,
+  ProviderPreset,
   ProxyAccountStatus, ProxyEvent, ProxyCheckinRow, CcSwitchStatus, CcSwitchRegisterResult,
   CheckinCenterSnapshot, CheckinOnboardingResult, CheckinPlansPreview, CheckinPlansClaimResult, ProxyCheckinHistoryRow,
   ProxyOpLogList, ProxyOpLogRow,
@@ -265,6 +267,9 @@ export const skillsSideStats = () => call<SkillsSideStats>("skills_side_stats");
 export const probeAgents = () => call<ProbeRow[]>("probe_agents");
 export const removeTool = (id: string, confirm?: boolean) =>
   call<{ ok: boolean; message?: string; builtin?: boolean; mounts?: { skill: string; path: string }[]; sourceCount?: number; openConflicts?: number; unmounted?: number }>("remove_tool", { id, confirm: !!confirm });
+// 技能仓库：每日健康全自动检测与状态
+export const runDailyCheck = (opts?: { autoMount?: boolean }) => call<DailyCheckResult>("skills_daily_check", opts || {});
+export const getDailyCheckStatus = () => call<DailyCheckResult>("skills_daily_check_status");
 
 // ===== 技能仓库：总览 / 技能库 / 详情 =====
 export const getOverview = () => call<Overview>("get_overview");
@@ -673,6 +678,9 @@ export const memoryProviderTest = (id: string, modelId?: string) =>
 export const memoryProviderFetchModels = (id: string) =>
   call<{ ok: boolean; models: { id: string; tags: string[]; reasoning: { enabled: boolean; effort: string }; caps: Record<string, unknown> }[]; message?: string }>("memory_provider_fetch_models", { id }, 0);
 export const memoryProviderQuirks = (id?: string) => call<{ memo: Record<string, unknown>; log: unknown[] }>("memory_provider_quirks", { id });
+/** 从本地网关导入：主进程内解密网关 Key 并写入记忆供应商（明文 Key 不回渲染层，只回数量） */
+export const memoryProviderImportGateway = (input: { providerId: string; accountId?: string; modelIds?: string[] }) =>
+  call<{ ok: boolean; providerId?: string; modelCount?: number; message?: string }>("memory_provider_import_gateway", input);
 export const memoryModelList = (providerId?: string) =>
   call<{ models: Record<string, unknown>[] }>("memory_model_list", { providerId });
 export const memoryModelSave = (input: Record<string, unknown>) => call<{ ok: boolean; id: string }>("memory_model_save", input as Record<string, unknown>);
@@ -1047,12 +1055,43 @@ export type LocalgwKeyRow = {
 };
 
 export type LocalgwRoute = {
-  strategy: "smart" | "fixed" | "round-robin" | "score" | "cost-first";
+  strategy: "smart" | "fixed" | "round-robin" | "score" | "cost-first" | "credit-first";
   fixedChannel: string;
   enableFailover: boolean;
   cooldownMs: number;
   cooldownCapMs: number;
+  /** 会话粘性：auto = 5 分钟无往来放手；on = 一直保持；off = 关闭 */
+  sticky: "auto" | "on" | "off";
+  /** 能力过滤：请求带 tools/images/video 时剔除声明确实不支持的候选 */
+  needsFilter: boolean;
   perChannel: Record<string, { enabled: boolean }>;
+};
+
+/** 选路计划的一行：可用候选按位次，不可用候选带原因 */
+export type LocalgwRoutePlanRow = {
+  id: string;
+  name: string;
+  state: string;
+  reason: string;
+  resetAt: number;
+};
+
+export type LocalgwRoutePlanChannel = {
+  channel: string;
+  realModel: string;
+  group: string;
+  stickyHit: boolean;
+  ordered: LocalgwRoutePlanRow[];
+  blocked: LocalgwRoutePlanRow[];
+};
+
+export type LocalgwRoutePlan = {
+  ok: boolean;
+  message?: string;
+  model: string;
+  channels: LocalgwRoutePlanChannel[];
+  sticky: string;
+  state: { cursors: number; sticky: number; resting: number; sunken: number; open: number };
 };
 
 export type LocalgwActiveRequest = { id: string; keyPrefix: string; startedAt: number; elapsedMs: number; phase: string; channel: string; model: string; attempts: number };
@@ -1100,6 +1139,8 @@ export type LocalgwChannelModel = { id: string; realModel: string };
 
 export type LocalgwLogRow = {
   attempts?: { channel: string; model: string; code: string; ms: number; committed: boolean;
+    /** 本次尝试实际使用的账号 id（本机 UUID，不含凭据）：积分优先选号后核查"为什么走这个号" */
+    accountId?: string;
     /** 插件报告的尝试事实，仅供诊断，不代表已执行/计费或改变绑定。 */
     executionFacts?: { attemptId: string; number: number; state: "planned" | "responded"; actualModel: string; upstreamReportedModel?: string }[];
   }[];
@@ -1153,6 +1194,10 @@ export const localgwKeysDelete = (id: string) =>
 
 // ---- 路由 / 渠道 ----
 export const localgwRouteGet = () => call<LocalgwRoute>("localgw_route_get");
+/** 只读计划预览：这个模型的下一个请求会先落到谁、其余候选为什么排后面。
+ *  不推进游标、不写粘性、不改账号状态，可安全轮询。 */
+export const localgwRoutePlan = (model: string, stickyKey = "") =>
+  call<LocalgwRoutePlan>("localgw_route_plan", { model, stickyKey });
 export const localgwRouteSet = (patch: Partial<LocalgwRoute>) =>
   call<{ ok: boolean }>("localgw_route_set", JSON.parse(JSON.stringify(patch)));
 export const localgwChannelToggle = (channel: string, enabled: boolean) =>
@@ -1222,6 +1267,30 @@ export const localgwModelsRemoveRule = (kind: "overrides" | "aliases" | "custom"
  *  组名与 overrides / custom / aliases 重名会被后端拒绝（组优先级更高，重名会让另一套规则静默失效）。 */
 export const localgwModelsSetGroup = (name: string, payload: LocalgwModelGroup) =>
   call<{ ok: boolean; message?: string; added?: number }>("localgw_models_set_group", { name, payload });
+
+/** 积分优先选号的只读预览（本期无所属界面，供排障/后续 UI 使用）：
+ *  输入对外模型名，返回按当前号池状态算出的候选顺序与不可用原因，无副作用。 */
+export type LocalgwCreditPreviewRow = {
+  /** 可用候选的名次（1 起）；不可用候选为 0 */
+  order: number;
+  channel: string;
+  realModel: string;
+  source: string;
+  groupName: string;
+  accountId: string;
+  accountName: string;
+  /** 免费 / 有效到期 / 确认永久 / 期限未知 */
+  bucket: string;
+  rank: number | null;
+  expiresAt: number;
+  credits?: number;
+  inFlight: number;
+  limit: number;
+  eligible: boolean;
+  reason: string;
+};
+export const localgwCreditRoutePreview = (model: string) =>
+  call<{ ok: boolean; model: string; candidates: LocalgwCreditPreviewRow[] }>("localgw_credit_route_preview", { model });
 
 // ---- 配置（深合并补丁，写回主 config.json 的 localgw 段）----
 export const localgwConfigGet = () => call<Record<string, unknown>>("localgw_config_get");
@@ -1390,6 +1459,10 @@ export type ProxyProviderInput = {
   display: string;
   baseUrl: string;
   kind?: ProxyProviderKind;
+  /** 鉴权头风格；仅 anthropic_messages 档有意义 */
+  auth?: ProxyProvider["auth"];
+  /** 预设标识：后端按它补全没给的字段（display/baseUrl/kind/auth/models） */
+  preset?: string;
   domain?: string;
   models?: ProxyProviderModel[];
   extraHeaders?: Record<string, string>;
@@ -1398,7 +1471,7 @@ export type ProxyProviderInput = {
 };
 
 export const proxyProviderList = () =>
-  call<{ ok: boolean; providers?: ProxyProvider[]; message?: string }>("proxy_provider_list");
+  call<{ ok: boolean; providers?: ProxyProvider[]; presets?: ProviderPreset[]; message?: string }>("proxy_provider_list");
 export const proxyProviderCreate = (input: ProxyProviderInput) =>
   call<{ ok: boolean; provider?: ProxyProvider; keyIds?: string[]; message?: string }>("proxy_provider_create", input as unknown as Record<string, unknown>);
 export const proxyProviderUpdate = (input: Partial<ProxyProviderInput> & { id: string }) =>

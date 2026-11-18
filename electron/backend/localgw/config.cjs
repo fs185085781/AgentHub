@@ -49,6 +49,12 @@ const LOCALGW_DEFAULTS = {
     cooldownMs: 120000,
     cooldownCapMs: 900000,
     maxRetriesPerRequest: 3,
+    /** 会话粘性：auto = 5 分钟无往来就放手；on = 一直保持；off = 关闭。
+     *  粘性命中且账号可用时置顶，命中但不可用则不动位次（不消耗轮转位）。 */
+    sticky: "auto",
+    /** 能力过滤：请求带 tools/images/video 时，先剔除声明确实不支持的候选。
+     *  过滤后一个都不剩时保留原候选 —— 宁可让上游回明确的 400，也不在网关层制造无解。 */
+    needsFilter: true,
     preferChannels: [],
     blockedChannels: [],
     /** 渠道启闭表 { channelId: boolean }：由 routing.setChannelEnabled 写入。
@@ -76,7 +82,9 @@ const LOCALGW_DEFAULTS = {
     /** 模型组：{ [对外名]: { strategy, members: [{ channel, real_model }] } }。
      *  与 aliases 的区别：别名是「一个名字 → 一个名字」，模型组是「一个对外名 → 多个
      *  （渠道 + 实际模型）候选」，转发时按 strategy 选一个成员，失败自动换下一个。
-     *  members 的顺序就是顺序优先策略的优先级。 */
+     *  strategy：priority=成员顺序；round-robin=在可用成员间轮转；
+     *  credit=跨渠道积分优先（免费 → 先到期 → 后到期 → 永久/未知，见 credit-picker.cjs）。
+     *  members 的顺序就是顺序优先策略的优先级；credit 策略下同档同到期时也用它兜底。 */
     groups: {},
     disabledAliases: [],
     exposeInV1Models: true,
@@ -167,7 +175,7 @@ function normalizeChannelLocks(v) {
 /** 模型组条数 / 单组成员数上限：防手改配置把热路径（每次请求都要解析绑定）撑爆 */
 const MAX_MODEL_GROUPS = 200;
 const MAX_GROUP_MEMBERS = 100;
-const GROUP_STRATEGIES = ["priority", "round-robin"];
+const GROUP_STRATEGIES = ["priority", "round-robin", "credit"];
 /** 模型倍率条数上限与合法范围（防手改配置把热路径撑爆 / 写出 NaN） */
 const MAX_MODEL_RATES = 1000;
 const MAX_RATE_VALUE = 1000;
@@ -494,7 +502,7 @@ function normalize(raw) {
   m.security.readonlyToken = typeof m.security.readonlyToken === "string" ? m.security.readonlyToken : "";
 
   m.routing = mergeDeep(LOCALGW_DEFAULTS.routing, m.routing || {});
-  const STRATEGIES = ["smart", "fixed", "round-robin", "score", "cost-first"];
+  const STRATEGIES = ["smart", "fixed", "round-robin", "score", "cost-first", "credit-first"];
   // 非法值回退到默认值本身（cost-first）：原先回退 "score" 会让「配置写错」变成「悄悄换了套策略」
   if (!STRATEGIES.includes(m.routing.strategy)) m.routing.strategy = "cost-first";
   m.routing.fixedChannel = typeof m.routing.fixedChannel === "string" ? m.routing.fixedChannel : "";
@@ -502,6 +510,9 @@ function normalize(raw) {
   m.routing.cooldownMs = clampInt(m.routing.cooldownMs, 120000, 10000, 3600000);
   m.routing.cooldownCapMs = clampInt(m.routing.cooldownCapMs, 900000, 60000, 7200000);
   m.routing.maxRetriesPerRequest = clampInt(m.routing.maxRetriesPerRequest, 3, 1, 10);
+  // 粘性/能力过滤：非法值回退到默认，不让手改 config.json 把增强悄悄关掉
+  if (!["auto", "on", "off"].includes(m.routing.sticky)) m.routing.sticky = "auto";
+  m.routing.needsFilter = m.routing.needsFilter !== false;
   m.routing.preferChannels = Array.isArray(m.routing.preferChannels) ? m.routing.preferChannels.filter((s) => typeof s === "string") : [];
   m.routing.blockedChannels = Array.isArray(m.routing.blockedChannels) ? m.routing.blockedChannels.filter((s) => typeof s === "string") : [];
   m.routing.perChannelEnabled = plainObject(m.routing.perChannelEnabled) ? m.routing.perChannelEnabled : {};
@@ -659,10 +670,13 @@ function patch(p) {
     }
     incoming.port = port;
   }
+  if (incoming.routing && incoming.routing.sticky !== undefined && !["auto", "on", "off"].includes(incoming.routing.sticky)) {
+    return { ok: false, message: "会话粘性只支持 auto / on / off" };
+  }
   if (incoming.routing && incoming.routing.strategy !== undefined) {
-    const STRATEGIES = ["smart", "fixed", "round-robin", "score", "cost-first"];
+    const STRATEGIES = ["smart", "fixed", "round-robin", "score", "cost-first", "credit-first"];
     if (!STRATEGIES.includes(incoming.routing.strategy)) {
-      return { ok: false, message: "路由策略只支持 smart / fixed / round-robin / score / cost-first" };
+      return { ok: false, message: "路由策略只支持 smart / fixed / round-robin / score / cost-first / credit-first" };
     }
   }
   if (incoming.outbound !== undefined) {

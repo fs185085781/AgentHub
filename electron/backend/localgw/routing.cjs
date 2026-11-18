@@ -162,6 +162,9 @@ function lookupChannelLock(locks, name) {
  *   · round-robin 候选内轮转，保证多渠道路由均衡
  *   · smart       preferChannels 优先，其余按 score
  *   · score       纯打分（preferChannels 不参与，用于"只看余额/在线数"的场景）
+ *   · cost-first  按渠道成本档（免费 → 低成本 → 普通）排序
+ *   · credit-first 不经过本函数：账号级跨渠道积分排序见 credit-picker.cjs，
+ *                 server.cjs 会直接把「账号+渠道+真实模型」钉给执行器。
  *  模型级覆盖（models.overrides[model].channel）在所有策略之前生效——它是用户对单个模型的硬指定。
  *  渠道锁定（models.channelLocks[model]）同优先级：它是 v1.82.2「渠道覆盖」的语义，只锁渠道。 */
 function pick(model, except) {
@@ -202,9 +205,12 @@ function pick(model, except) {
     return list[idx];
   }
   if (c.routing.strategy === "score") {
-    // candidates 已按 prefer→score 排好；score 策略刻意忽略 preferChannels
+    // candidates 已按 prefer→score 排好；score 策略刻意忽略 preferChannels。
+    // 摘要一次算齐再排：比较器里直接查库是 O(N log N) 次重复查询（candidates() 上已有同类教训）
+    const summaryCache = new Map();
+    for (const id of list) summaryCache.set(id, channelSummary(id));
     const scored = list.slice().sort((a, b) => {
-      const d = score(b, channelSummary(b)) - score(a, channelSummary(a));
+      const d = score(b, summaryCache.get(b)) - score(a, summaryCache.get(a));
       return d !== 0 ? d : (a < b ? -1 : a > b ? 1 : 0);
     });
     return scored[0];
@@ -267,6 +273,8 @@ function routeState() {
     enableFailover: c.routing.failover,
     cooldownMs: c.routing.cooldownMs,
     cooldownCapMs: c.routing.cooldownCapMs,
+    sticky: c.routing.sticky || "auto",
+    needsFilter: c.routing.needsFilter !== false,
     preferChannels: c.routing.preferChannels,
     blockedChannels: c.routing.blockedChannels,
     perChannel,
@@ -282,6 +290,8 @@ function setRoute(patch) {
   if (patch.enableFailover !== undefined) next.failover = !!patch.enableFailover;
   if (patch.cooldownMs !== undefined) next.cooldownMs = Number(patch.cooldownMs) || next.cooldownMs;
   if (patch.cooldownCapMs !== undefined) next.cooldownCapMs = Number(patch.cooldownCapMs) || next.cooldownCapMs;
+  if (patch.sticky !== undefined) next.sticky = ["auto", "on", "off"].includes(patch.sticky) ? patch.sticky : next.sticky;
+  if (patch.needsFilter !== undefined) next.needsFilter = patch.needsFilter !== false;
   if (patch.preferChannels !== undefined) next.preferChannels = Array.isArray(patch.preferChannels) ? patch.preferChannels : [];
   if (patch.blockedChannels !== undefined) next.blockedChannels = Array.isArray(patch.blockedChannels) ? patch.blockedChannels : [];
   if (patch.perChannel) {
@@ -297,6 +307,13 @@ function setRoute(patch) {
   // 越界入参（如非法 strategy）由 config.patch 显式拒绝，这里如实上抛而不是假装成功
   if (r && r.ok === false) return { ok: false, message: r.message || "路由配置写入失败" };
   return { ok: true, ...routeState() };
+}
+
+/** 只读计划预览（IPC localgw_route_plan）：这个模型的下一个请求会先落到谁、其余候选为什么排后面。
+ *  与转发路径共用 route-plan 的排序规则；不推进游标、不写粘性、不改账号状态。
+ *  惰性 require：route-assist 依赖 pool/config，顶层引入会把「只看路由」的调用方也拖上号池。 */
+async function previewPlan(model, options) {
+  return require("./route-assist.cjs").previewModel(model, options || {});
 }
 
 /** 活跃渠道数（status IPC 用） */
@@ -377,6 +394,7 @@ module.exports = {
   groupMemberKey,
   candidates,
   routeState,
+  previewPlan,
   setRoute,
   setChannelEnabled,
   isChannelEnabled,

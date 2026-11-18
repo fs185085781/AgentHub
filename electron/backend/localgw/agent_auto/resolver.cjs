@@ -30,6 +30,7 @@ const RULE_DEFAULTS = {
   strictRules: true,
   sticky: { enabled: true, ttlSec: 600 },
   penalize: { coolSec: 120 },
+  cacheMs: 500,
   debug: false,
 };
 
@@ -87,6 +88,7 @@ function normalize(raw) {
   if (raw.penalize && typeof raw.penalize === "object") {
     out.penalize = { coolSec: Number.isFinite(Number(raw.penalize.coolSec)) ? Math.max(0, Number(raw.penalize.coolSec)) : 120 };
   }
+  out.cacheMs = Number.isFinite(Number(raw.cacheMs)) ? Math.max(0, Math.min(5000, Number(raw.cacheMs))) : 500;
   out.debug = raw.debug === true;
   return out;
 }
@@ -176,8 +178,31 @@ function rankIdx(order, kind) {
 }
 
 /** 单渠道的可用号列表（已按「档位 + 快过期先榨 + 余额少先榨 + 并发少 + 最久未用」排序）
+ *  nativeRank 保留上游 accountPlan 的原始顺序：改写 binding 时只要把「上游排在目标号前面」
+ *  的那些号排除掉，就能钉住目标号，同时不牺牲同渠道内后续的换号重试。
+ *  结果带 TTL 缓存（rules.cacheMs，默认 500ms）：同一请求的重试、并发请求共享一次扫描。
  *  @returns {{rows: Array, packages: Map, isFree: boolean}} */
+const planCache = new Map();
+
 function planChannel(channel, realModel, rules, now) {
+  const ttl = Number(rules && rules.cacheMs);
+  const cacheMs = Number.isFinite(ttl) && ttl > 0 ? Math.min(5000, ttl) : 0;
+  const key = `${channel}\u0000${realModel}`;
+  if (cacheMs) {
+    const hit = planCache.get(key);
+    if (hit && now - hit.at <= cacheMs) return hit.value;
+  }
+  const value = buildPlan(channel, realModel, rules, now);
+  if (cacheMs) {
+    if (planCache.size > 256) {
+      for (const [k, v] of planCache) if (now - v.at > cacheMs) planCache.delete(k);
+    }
+    planCache.set(key, { at: now, value });
+  }
+  return value;
+}
+
+function buildPlan(channel, realModel, rules, now) {
   const isFree = rules.free_channels.includes(channel);
   let rows;
   try {
@@ -189,10 +214,10 @@ function planChannel(channel, realModel, rules, now) {
   try {
     packages = store.listAllCreditPackages(channel) || new Map();
   } catch { /* 无包时按 0 处理 */ }
-  const enriched = rows.map((row) => {
+  const enriched = rows.map((row, index) => {
     const stats = creditStats(packages.get(row.account.id), now);
     const tier = rankOf(stats, isFree, rules.ladder);
-    return { ...row, stats, tier: tier.kind, rank: tier.rank };
+    return { ...row, stats, tier: tier.kind, rank: tier.rank, nativeRank: index };
   });
   enriched.sort((a, b) => {
     if (a.eligible !== b.eligible) return a.eligible ? -1 : 1;
@@ -202,7 +227,8 @@ function planChannel(channel, realModel, rules, now) {
       || (credits(a) - credits(b))                                  // 同档余额少的先榨
       || (a.inFlight - b.inFlight)
       || ((a.account.lastUsed || 0) - (b.account.lastUsed || 0))
-      || String(a.account.id).localeCompare(String(b.account.id));
+      || String(a.account.id).localeCompare(String(b.account.id))
+      || (a.nativeRank - b.nativeRank);
   });
   return { rows: enriched, packages, isFree };
 }
@@ -214,9 +240,13 @@ function credits(row) {
   return Number.isFinite(c) ? c : 0;
 }
 
-// ===== 进程内状态：粘性会话 + 本地惩罚 =====
-const sticky = new Map();   // key → { channel, realModel, accountId, at }
+// ===== 进程内状态：上次选号结果 + 本地惩罚 =====
+// sticky 记录「某个外部模型上一次选中的 (渠道, 上游模型, 账号)」：
+// 下次同一个外部模型进来时直接复用，不再做跨渠道排序；只有它不可用了（失败被冷却/下线/换映射）才重排。
+const sticky = new Map();   // model → { channel, realModel, accountId, at }
 const penalty = new Map();  // accountId → until
+
+const EMPTY_SET = new Set();
 
 function penaltyAlive(accountId, now) {
   const until = penalty.get(accountId) || 0;
@@ -228,58 +258,117 @@ function penaltyAlive(accountId, now) {
 }
 
 function notePenalty(accountId, rules, now) {
-  const sec = Math.max(0, Number(rules.penalize.coolSec) || 0);
+  const sec = Math.max(0, Number(rules && rules.penalize && rules.penalize.coolSec) || 0);
   if (!accountId || !sec) return;
   penalty.set(accountId, now + sec * 1000);
 }
 
-/** 在候选集里挑目标：{channel, realModel, accountId, tier, ...} 或 null
- *  @param {{excluded?:Set<string>, tried?:Set<string>, bindings?:Array, now?:number}} ctx */
+function channelEnabled(channel) {
+  try {
+    const routing = require("../routing.cjs");
+    return typeof routing.isChannelEnabled === "function" ? !!routing.isChannelEnabled(channel) : true;
+  } catch {
+    return true;
+  }
+}
+
+/** 上游模型目录的账号级排除（executor 会把它们并进 excludeAccounts）。
+ *  选号时必须同口径过滤：否则会钉到一个「该号没声明支持这个模型」的号上，
+ *  再把别的号全排除 ⇒ 执行器一个号都选不到，报 503「渠道当前无可用账号」。 */
+function catalogExclusions(ctx, channel, realModel) {
+  try {
+    const catalog = ctx && ctx.catalog;
+    if (!catalog || typeof catalog.excludedAccounts !== "function") return EMPTY_SET;
+    const ids = catalog.excludedAccounts(channel, realModel);
+    return Array.isArray(ids) && ids.length ? new Set(ids) : EMPTY_SET;
+  } catch {
+    return EMPTY_SET;
+  }
+}
+
+function makePick(channel, realModel, plan, row, skip) {
+  // 只排除「上游排在目标号前面」的号：既能把执行器逼到目标号，又保留同渠道内后续换号重试的机会。
+  // pinExcludes 为空 ⇔ 目标号本来就是上游的首选，此时完全不用钉号，原生换号逻辑原样保留。
+  const pinExcludes = plan.rows
+    .filter((r) => r.eligible && !skip.has(r.account.id) && r.nativeRank < row.nativeRank)
+    .map((r) => r.account.id);
+  return {
+    channel,
+    realModel,
+    accountId: row.account.id,
+    pinExcludes,
+    tier: row.tier,
+    rank: row.rank,
+    unlimited: row.stats.unlimited,
+    soonest: row.stats.soonest,
+    credits: credits(row),
+    inFlight: row.inFlight,
+    lastUsed: row.account.lastUsed || 0,
+    reason: row.reason,
+    isFree: plan.isFree,
+  };
+}
+
+/** 复用上次选中的号：只校验这一个渠道的这一个号现在还活着，不重排。
+ *  @returns {object|null} 可直接使用的 pick；返回 null 表示上次的号已不可用 */
+function reuseLastPick(rules, key, spec, ctx, now) {
+  const hit = sticky.get(key);
+  if (!hit) return null;
+  const ttl = Math.max(0, Number(rules.sticky && rules.sticky.ttlSec) || 0) * 1000;
+  if (ttl > 0 && now - hit.at > ttl) return null;
+
+  const excluded = ctx.excluded || EMPTY_SET;
+  const tried = ctx.tried || EMPTY_SET;
+  if (excluded.has(hit.channel) || tried.has(hit.accountId) || penaltyAlive(hit.accountId, now)) return null;
+  if (!channelEnabled(hit.channel)) return null;
+  if (!spec.list.some((c) => c.channel === hit.channel && c.model === hit.realModel)) return null;
+  const declared = Array.isArray(ctx.bindings) ? ctx.bindings : null;
+  if (declared && !declared.some((m) => m.channel === hit.channel && m.realModel === hit.realModel)) return null;
+
+  const skip = catalogExclusions(ctx, hit.channel, hit.realModel);
+  if (skip.has(hit.accountId)) return null;
+  const plan = planChannel(hit.channel, hit.realModel, rules, now);
+  const row = plan.rows.find((r) => r.account.id === hit.accountId);
+  if (!row || !row.eligible) return null;
+  return makePick(hit.channel, hit.realModel, plan, row, skip);
+}
+
+/** 在候选集里挑目标：{channel, realModel, accountId, tier, pinExcludes, ...} 或 null
+ *  @param {{excluded?:Set<string>, tried?:Set<string>, bindings?:Array, catalog?:object, now?:number}} ctx */
 function choose(rules, model, ctx = {}) {
   const spec = modelSpec(rules, model);
   if (!spec) return null;
-  const excluded = ctx.excluded || new Set();
-  const tried = ctx.tried || new Set();
+  const excluded = ctx.excluded || EMPTY_SET;
+  const tried = ctx.tried || EMPTY_SET;
   const declared = Array.isArray(ctx.bindings) ? ctx.bindings : null;
   const now = ctx.now || Date.now();
-  const isFree = (ch) => rules.free_channels.includes(ch);
+  const key = String(model || "");
 
-  let routing;
-  try {
-    routing = require("../routing.cjs");
-  } catch {
-    return null;
+  // 1) 上次选好的号还能用：直接返回，跳过跨渠道排序
+  if (rules.sticky && rules.sticky.enabled) {
+    const last = reuseLastPick(rules, key, spec, ctx, now);
+    if (last) {
+      sticky.set(key, { channel: last.channel, realModel: last.realModel, accountId: last.accountId, at: now });
+      return last;
+    }
+    sticky.delete(key); // 上次的号失败/不可用：本次重排
   }
 
+  // 2) 跨渠道全量排序：候选渠道的可用号全部摆出来，按档位 / 到期 / 余额 / 并发 / 最久未用排序
   const picks = [];
   for (const cand of spec.list) {
     if (excluded.has(cand.channel)) continue;
     // 与 routing.candidates() 同一道门：渠道被关掉时 pick 不会发入场券（方案 §12-F1）
-    try {
-      if (typeof routing.isChannelEnabled === "function" && !routing.isChannelEnabled(cand.channel)) continue;
-    } catch { /* 配置未就绪时不阻塞 */ }
+    if (!channelEnabled(cand.channel)) continue;
     // 声明的行里必须真的有这个 (渠道, 上游模型)，否则改写后下游找不到 serviceRef
     if (declared && !declared.some((m) => m.channel === cand.channel && m.realModel === cand.model)) continue;
 
+    const skip = catalogExclusions(ctx, cand.channel, cand.model);
     const planned = planChannel(cand.channel, cand.model, rules, now);
-    const row = planned.rows.find((r) => r.eligible && !tried.has(r.account.id) && !penaltyAlive(r.account.id, now));
+    const row = planned.rows.find((r) => r.eligible && !tried.has(r.account.id)
+      && !penaltyAlive(r.account.id, now) && !skip.has(r.account.id));
     if (!row) continue;
-    picks.push({
-      channel: cand.channel,
-      realModel: cand.model,
-      accountId: row.account.id,
-      // 该渠道当前所有可用号：上层拿它做「除目标号外全部排除」的钉号
-      eligibleIds: planned.rows.filter((r) => r.eligible).map((r) => r.account.id),
-      tier: row.tier,
-      rank: row.rank,
-      unlimited: row.stats.unlimited,
-      soonest: row.stats.soonest,
-      credits: credits(row),
-      inFlight: row.inFlight,
-      lastUsed: row.account.lastUsed || 0,
-      reason: row.reason,
-      isFree: planned.isFree,
-    });
+    picks.push(makePick(cand.channel, cand.model, planned, row, skip));
   }
   if (!picks.length) return null;
 
@@ -292,32 +381,21 @@ function choose(rules, model, ctx = {}) {
     || a.channel.localeCompare(b.channel));
 
   const best = picks[0];
-  // 粘性只做「同档内的 tie-break」：不因为上次用过就放弃更便宜的档位
-  const key = String(model || "");
   if (rules.sticky && rules.sticky.enabled) {
-    const hit = sticky.get(key);
-    const ttl = Math.max(0, Number(rules.sticky.ttlSec) || 0) * 1000;
-    if (hit && now - hit.at <= ttl) {
-      const same = picks.find((p) => p.channel === hit.channel && p.accountId === hit.accountId);
-      // 同档 + 不比当前最优更忙才粘：否则并发会被全压到同一个号上，表现为"越用越慢"
-      if (same && same.rank === best.rank && (same.inFlight || 0) <= (best.inFlight || 0)) {
-        sticky.set(key, { ...hit, at: now });
-        return same;
-      }
-    }
+    sticky.set(key, { channel: best.channel, realModel: best.realModel, accountId: best.accountId, at: now });
   }
   return best;
-}
-
-/** 记录本次选择（粘性账本）。失败不抛。 */
-function remember(rules, model, pick, now) {
-  if (!pick || !rules.sticky || !rules.sticky.enabled) return;
-  sticky.set(String(model || ""), { channel: pick.channel, realModel: pick.realModel, accountId: pick.accountId, at: now || Date.now() });
 }
 
 /** 上游判定某号已不可用时，本地也压一段时间，避免它刚复活又被粘回去 */
 function penalizeUnavailable(rules, accountId, now) {
   notePenalty(accountId, rules, now || Date.now());
+}
+
+/** 清除某个外部模型的选号缓存：下一次请求必定重新跨渠道排序 */
+function invalidate(model) {
+  sticky.delete(String(model || ""));
+  return true;
 }
 
 module.exports = {
@@ -329,7 +407,7 @@ module.exports = {
   creditStats,
   planChannel,
   choose,
-  remember,
+  invalidate,
   penalizeUnavailable,
   sticky,
   penalty,

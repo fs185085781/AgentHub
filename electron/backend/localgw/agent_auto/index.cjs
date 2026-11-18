@@ -18,6 +18,7 @@ const store = require("../../proxy/store.cjs");
 const resolver = require("./resolver.cjs");
 
 const BUDGET_FALLBACK = 3;
+const SNAPSHOT = Symbol("agent_auto_snapshot");
 
 function lgwConfig() {
   try { return require("../config.cjs"); } catch { return null; }
@@ -304,6 +305,9 @@ function declare(model, native, ctx = {}) {
       realModel: c.model,
       source: "agent_auto",
       ...metaOf(c.model, c.channel, ctx.snapshot),
+      // 用 Symbol 携带本次快照：server.cjs 的 { ...binding } 会连同符号属性一起复制，
+      // apply 才能拿到 catalog.excludedAccounts 做同口径的账号排除。
+      [SNAPSHOT]: ctx.snapshot || null,
     }));
     return rows;
   } catch (e) {
@@ -326,6 +330,48 @@ function unionTried(triedAccounts) {
   return out;
 }
 
+/** 钉号账本：WeakMap 以 server.cjs 里那个 bindings 数组为键（同一次请求的多轮尝试共享同一个引用），
+ *  记录「上一轮为了钉号而临时排除的号」，下一轮开始前先撤掉。
+ *  不撤的话这些号会被上游当成「本轮已尝试」，一次失败就会被判成「渠道没有可用号」，
+ *  既丢掉了同渠道换号重试，又会把最终错误误导成 503「渠道当前无可用账号」。 */
+const pinState = new WeakMap();
+
+function releasePin(bindings, triedAccounts) {
+  if (!bindings || typeof bindings !== "object") return;
+  const state = pinState.get(bindings);
+  if (!state) return;
+  pinState.delete(bindings);
+  if (!triedAccounts || typeof triedAccounts.get !== "function") return;
+  for (const [channel, ids] of state) {
+    const set = triedAccounts.get(channel);
+    if (!set) continue;
+    for (const id of ids) set.delete(id);
+  }
+}
+
+function pinAccount(bindings, triedAccounts, pick) {
+  const ids = Array.isArray(pick.pinExcludes) ? pick.pinExcludes : [];
+  if (!ids.length || !triedAccounts || typeof triedAccounts.set !== "function") return;
+  const set = triedAccounts.get(pick.channel) || new Set();
+  for (const id of ids) set.add(id);
+  triedAccounts.set(pick.channel, set);
+  let state = pinState.get(bindings);
+  if (!state) {
+    state = new Map();
+    pinState.set(bindings, state);
+  }
+  state.set(pick.channel, new Set(ids));
+}
+
+function snapshotOf(bindings) {
+  try {
+    const row = Array.isArray(bindings) && bindings.length ? bindings[0] : null;
+    return row ? row[SNAPSHOT] || null : null;
+  } catch {
+    return null;
+  }
+}
+
 function apply(binding, ctx = {}) {
   try {
     if (!binding || binding.source !== "agent_auto") return null;
@@ -333,12 +379,16 @@ function apply(binding, ctx = {}) {
     if (!ready) return null;
 
     const triedAccounts = ctx.triedAccounts;
+    // 先撤销上一轮的临时钉号，否则本轮的 tried 会把从未真正用过的号也算进去
+    releasePin(ctx.bindings, triedAccounts);
     const tried = unionTried(triedAccounts);
+    const snapshot = snapshotOf(ctx.bindings);
     const t0 = process.hrtime.bigint();
     const pick = resolver.choose(rules, ctx.model, {
       excluded: ctx.excluded,
       tried,
       bindings: ctx.bindings,
+      catalog: snapshot && snapshot.catalog,
     });
     const chooseMs = Number(process.hrtime.bigint() - t0) / 1e6;
     if (!pick) return null;
@@ -350,16 +400,9 @@ function apply(binding, ctx = {}) {
       return null;
     }
 
-    // 钉号：把该渠道除目标号以外的可用号全部塞进 triedAccounts，
-    // 转发器会把它们变成 excludeAccounts，执行器只能落到目标号上。
-    if (triedAccounts && typeof triedAccounts.set === "function") {
-      const set = triedAccounts.get(pick.channel) || new Set();
-      for (const id of pick.eligibleIds || []) {
-        if (id !== pick.accountId) set.add(id);
-      }
-      triedAccounts.set(pick.channel, set);
-    }
-    resolver.remember(rules, ctx.model, pick, Date.now());
+    // 钉号：只排除「上游排在目标号前面」的号，执行器才会落到目标号；
+    // 排在目标号之后的号保持可用，失败时上游仍能在本渠道内继续换号。
+    pinAccount(ctx.bindings, triedAccounts, pick);
     decisionLog(rules, {
       model: ctx.model,
       attempt: ctx.attempt || 0,
@@ -368,6 +411,7 @@ function apply(binding, ctx = {}) {
       accountId: pick.accountId,
       tier: pick.tier,
       rank: pick.rank,
+      pinned: !!(pick.pinExcludes && pick.pinExcludes.length),
       chooseMs: Math.round(chooseMs * 100) / 100,
       candidates: (ctx.bindings || []).map((m) => `${m.channel}/${m.realModel}`),
     });
@@ -377,6 +421,17 @@ function apply(binding, ctx = {}) {
     warn(`apply 降级为不接管：${String((e && e.message) || e)}`);
     return null;
   }
+}
+
+/** 每次转发结束后由 server.cjs 回调（一行桥接）：
+ *  HTTP 非 200 / 上游失败 → 清掉这个外部模型的选号缓存，下一次请求重新跨渠道排序选号。
+ *  成功则保留缓存，下一次直接复用这次的 (渠道 + 上游模型 + 账号)。 */
+function noteResult(binding, result) {
+  try {
+    if (!binding || binding.source !== "agent_auto") return;
+    if (result && result.ok === true) return;
+    resolver.invalidate(binding.id || binding.display || "");
+  } catch { /* 清缓存失败不影响转发 */ }
 }
 
 // ===== 第⑤行：外部旧 Token → 本机真实 Token（验权前替换） =====
@@ -497,6 +552,7 @@ function reload() {
 module.exports = {
   declare,
   apply,
+  noteResult,
   list,
   translateKey,
   lint,

@@ -457,6 +457,7 @@ async function handleCompletion(req, res, ctx, protocol) {
           catalogExcludeAccounts: () => snapshot.catalog.excludedAccounts(channel, binding.realModel),
           catalogModels: accountId => snapshot.catalog.accountModels(channel, accountId), attempt: attemptLedger.used + 1,
           attemptsRemaining: attemptLedger.remaining - 1, attemptLedger, excludeAccounts: [...(triedAccounts.get(accountScope) || [])] }, Number.isFinite(until) ? Math.max(1, until - Date.now()) : 0, emit, ac.signal);
+      require("./agent_auto/index.cjs").noteResult(binding, forwardResult); // agent_auto：非成功清除该模型选号缓存
       requestState.attempts = attemptLedger.used;
       // committed 取两者之或：本地 sink 已写响应头，或转发层已向客户端吐出可消费内容。
       // 只看局部变量时，非流式 / 降级重发路径会把「已输出」记成 false，日志漏标。

@@ -8,8 +8,9 @@
     "expose": "only = /v1/models 只列本文件里的名字；merge = 追加在原生列表之后。",
     "exclusive": "true = 本文件之外的名字一律 404；false = 原生模型名照常可用。",
     "strictRules": "true = 规则命中但候选全不可用时直接 503（规则权威）。",
-    "sticky": "同一模型在 TTL 内优先落在同一个号上，只在同档位内做 tie-break。",
-    "penalize": "上游判定某号不可用后，本地再压制 coolSec 秒。",
+    "sticky": "同一外部模型上一次选中的 (渠道 + 上游模型 + 账号) 会被直接复用，不再跨渠道排序；该号失败/冷却/下线/映射变化时才重排。",
+    "penalize": "上游判定某号不可用后，本地再压制 coolSec 秒，避免它刚复活又被粘回去。",
+    "cacheMs": "单渠道选号计划的内存缓存毫秒数（默认 500，0 = 关闭）；影响每次选号要扫多少遍库。",
     "debug": "true = 把每次选号决策写入 <数据目录>/agent_auto/decisions.jsonl。"
   },
   "models": {},
@@ -21,5 +22,6 @@
   "strictRules": true,
   "sticky": { "enabled": true, "ttlSec": 600 },
   "penalize": { "coolSec": 120 },
+  "cacheMs": 500,
   "debug": false
 }

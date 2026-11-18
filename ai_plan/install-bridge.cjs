@@ -37,6 +37,9 @@ const AUTH_PATCH = "  const raw = require(\"./agent_auto/index.cjs\").translateK
 const BOOT_ORIG = "async function doStart() {\n  const c = lgwConfig.get();";
 const BOOT_PATCH = "async function doStart() {\n  try { require(\"./agent_auto/index.cjs\").ensureDictLater(null); } catch { /* 启动时先落一份渠道字典；失败不影响启动 */ }\n  const c = lgwConfig.get();";
 
+const RESULT_ORIG = "      requestState.attempts = attemptLedger.used;";
+const RESULT_PATCH = "      require(\"./agent_auto/index.cjs\").noteResult(binding, forwardResult); // agent_auto：非成功清除该模型选号缓存\n      requestState.attempts = attemptLedger.used;";
+
 const PATCHES = [
   { name: "① 模型解析 (L350)", orig: DECL_ORIG, patched: DECL_PATCH },
   { name: "② 选号改写 (L431/432)", orig: APPLY_ORIG, patched: APPLY_PATCH },
@@ -44,6 +47,7 @@ const PATCHES = [
   { name: "④ Anthropic /v1/models (L555)", orig: ANTH_ORIG, patched: ANTH_PATCH },
   { name: "⑤ Token 映射 (L65)", orig: AUTH_ORIG, patched: AUTH_PATCH },
   { name: "⑥ 启动生成字典 (doStart)", orig: BOOT_ORIG, patched: BOOT_PATCH },
+  { name: "⑦ 失败清缓存 (forward 之后)", orig: RESULT_ORIG, patched: RESULT_PATCH },
 ];
 
 function count(hay, needle) {

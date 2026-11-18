@@ -164,6 +164,13 @@ function defaultConfig() {
       "workbuddy-ai": { enabled: true, paths: [".workbuddy-ai/skills"] },
       antigravity: { enabled: true, paths: [".gemini/antigravity/skills", ".gemini/config/skills"] },
       agents: { enabled: true, paths: [".agents/skills"] },
+      // 新增常用内置渠道（商汤小浣熊、AutoClaw、Qoder CN、Qoder 国际版、Trae 等）
+      raccoon: { enabled: true, paths: [".box-agent/skills", ".raccoon/skills", "%APPDATA%/office-raccoon/skills"] },
+      autoclaw: { enabled: true, paths: [".autoclaw/skills", "%APPDATA%/AutoClaw/skills", "%LOCALAPPDATA%/Programs/AutoClaw/skills"] },
+      autoclaw_intl: { enabled: true, paths: [".autoclaw-intl/skills", "%APPDATA%/AutoClaw-intl/skills"] },
+      qoder: { enabled: true, paths: [".qoder/skills", "%APPDATA%/Qoder/skills"] },
+      qoder_intl: { enabled: true, paths: [".qoder-intl/skills", ".qoder_intl/skills", "%APPDATA%/Qoder-intl/skills"] },
+      trae: { enabled: true, paths: [".trae/skills", "%APPDATA%/Trae/skills"] },
     },
     customDirs: [],
     mountMode: "junction", // copy 是兜底
@@ -289,6 +296,9 @@ function defaultConfig() {
       daily: false,         // 每天定时同步
       dailyTime: "09:00",
       notifyOnSuccess: false, // 同步成功也通知（失败总通知）
+      dailyCheck: true,        // 技能仓库：每日全自动检测各渠道健康与技能变更
+      dailyCheckTime: "09:00", // 每日自动检测时刻
+      dailyCheckAutoMount: true, // 检测时自动修复失效挂载与无冲突自动纳管
     },
     // 自动感知：后台按周期快照各工具技能目录，有新技能且零冲突才自动收纳，有冲突只提醒
     watch: {
@@ -792,6 +802,7 @@ function saveConfig(cfg, opts = {}) {
     // 解密失败保护（issue #95）：loadConfig 解不开 enc:v1: 密文（换机 / DPAPI 变化）时
     // 内存密码是 ""，若直接落盘会把好端端的密文覆盖成空——网关启停等后台读改写保存都会触发。
     // 服务器未变而密码为空 = 本机没有新密码可写 → 保留磁盘密文；
+    // 有新密码时必须正常覆盖（issue #185），否则换机后重新输入密码也无法恢复。
     // 换服务器（endpoint/username 变了）正常写空，显式清除走 clearSharedWebdav。
     // encryptionPassphrase（号池加密口令，issue #89）无「换服务器」概念：为空一律保留磁盘密文
     try {
@@ -799,7 +810,8 @@ function saveConfig(cfg, opts = {}) {
       const dsh = raw && raw.webdavShared;
       if (dsh && typeof dsh.password === "string" && dsh.password
           && String(dsh.endpoint || "") === disk.webdavShared.endpoint
-          && String(dsh.username || "") === disk.webdavShared.username) {
+          && String(dsh.username || "") === disk.webdavShared.username
+          && !disk.webdavShared.password) {
         disk.webdavShared.password = dsh.password;
       }
       if (dsh && typeof dsh.encryptionPassphrase === "string" && dsh.encryptionPassphrase

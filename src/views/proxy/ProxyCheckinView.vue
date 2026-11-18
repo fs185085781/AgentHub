@@ -43,6 +43,43 @@ const webMode = isWebTransport();
 const snap = ref<CheckinCenterSnapshot | null>(null);
 const loading = ref(false);
 const err = ref("");
+/** 最新刷新时间毫秒戳 */
+const lastRefreshedAt = ref<number>(0);
+
+/** 自动刷新开关（默认从 localStorage 读，开启后每 60 秒自动刷新） */
+const autoRefresh = ref(localStorage.getItem("agenthub.checkin.autoRefresh") === "1");
+let autoTimer: ReturnType<typeof setInterval> | undefined;
+
+function formatRefreshTime(ts: number): string {
+  if (!ts) return "尚未刷新";
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  if (autoRefresh.value && active.value) {
+    autoTimer = setInterval(() => {
+      if (active.value && !loading.value) {
+        refresh();
+      }
+    }, 60000);
+  }
+}
+
+function stopAutoRefresh() {
+  if (autoTimer) {
+    clearInterval(autoTimer);
+    autoTimer = undefined;
+  }
+}
+
+watch(autoRefresh, (v) => {
+  localStorage.setItem("agenthub.checkin.autoRefresh", v ? "1" : "0");
+  if (v) startAutoRefresh();
+  else stopAutoRefresh();
+});
 
 /** 展开状态：键 = `daily:渠道` / `onboarding:账号` / `plans:账号` */
 const expanded = reactive(new Set<string>());
@@ -108,6 +145,7 @@ async function refresh() {
   err.value = "";
   try {
     snap.value = await api.proxyCheckinCenter();
+    lastRefreshedAt.value = snap.value?.generatedAt || Date.now();
   } catch (e) {
     const msg = String((e as Error)?.message || e || "签到数据读取失败");
     err.value = msg;
@@ -218,31 +256,58 @@ function ledgerText(v: number) {
 }
 
 onMounted(() => {
-  if (active.value) refresh();
+  if (active.value) {
+    refresh();
+    if (autoRefresh.value) startAutoRefresh();
+  }
 });
 
 // 切到本页时拉一次：首次进入与从别的页签切回来都走这里（页面是 v-show，不会重新 mount）
 const stopWatch = watch(active, (on) => {
-  if (on) refresh();
+  if (on) {
+    refresh();
+    if (autoRefresh.value) startAutoRefresh();
+  } else {
+    stopAutoRefresh();
+  }
 });
 
 onUnmounted(() => {
   stopWatch();
+  stopAutoRefresh();
 });
 </script>
 
 <template>
   <section class="page">
-    <div class="page-head">
-      <div>
-        <h2 class="page-title">签到中心</h2>
-        <span class="page-sub">
-          每日签到 / 新手福利 / 活动福利 / 成长任务 —— 按渠道真实能力显示，没有能力的整节不出现
+    <div class="ck-top-bar">
+      <div class="ck-top-left">
+        <span class="ck-live-dot" :class="{ 'is-loading': loading }"></span>
+        <span class="ck-refresh-time">
+          最新刷新：<b class="mono">{{ formatRefreshTime(lastRefreshedAt) }}</b>
         </span>
+        <span class="ck-day-chip">{{ snap?.today || "—" }}</span>
+        <div class="ck-auto-switch">
+          <el-switch
+            v-model="autoRefresh"
+            size="small"
+            active-color="var(--accent, #38bdf8)"
+          />
+          <span class="ck-auto-text">
+            自动刷新
+            <span v-if="autoRefresh" class="ck-auto-hint">（每 60 秒）</span>
+          </span>
+        </div>
       </div>
-      <div class="page-actions">
-        <span class="ck-day">{{ snap?.today || "—" }}</span>
-        <button class="btn btn-sm" :disabled="loading" @click="refresh">{{ loading ? "刷新中…" : "刷新" }}</button>
+      <div class="ck-top-right">
+        <button class="ck-refresh-btn" :disabled="loading" @click="refresh">
+          <svg class="ck-btn-icon" :class="{ spinning: loading }" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M23 4v6h-6"></path>
+            <path d="M1 20v-6h6"></path>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+          </svg>
+          <span>{{ loading ? "刷新中…" : "刷新数据" }}</span>
+        </button>
       </div>
     </div>
 
@@ -258,12 +323,10 @@ onUnmounted(() => {
           <span class="ck-stat-label">今日签到进度</span>
           <span class="ck-stat-value">{{ daily?.todayDone ?? 0 }}<small>/ {{ daily?.todayEligible ?? 0 }}</small></span>
           <div class="ck-bar"><i :style="{ width: donePct + '%' }"></i></div>
-          <span class="ck-stat-foot">已签 {{ donePct }}%</span>
         </div>
         <div class="ck-stat">
           <span class="ck-stat-label">渠道分组</span>
           <span class="ck-stat-value">{{ daily?.providers.length ?? 0 }}<small>个</small></span>
-          <span class="ck-stat-foot">按渠道展开可逐账号签到</span>
         </div>
         <div class="ck-stat">
           <span class="ck-stat-label">待领新手福利</span>
@@ -273,7 +336,6 @@ onUnmounted(() => {
         <div class="ck-stat">
           <span class="ck-stat-label">今日活动福利</span>
           <span class="ck-stat-value">{{ claimedPlans }}<small>/ {{ planRows.length }}</small></span>
-          <span class="ck-stat-foot">领取需滑块验证码</span>
         </div>
       </div>
 
@@ -281,7 +343,6 @@ onUnmounted(() => {
       <section class="ck-panel">
         <header class="ck-panel-head">
           <h3>每日签到</h3>
-          <span class="ck-panel-sub">按渠道分组 · 点击行展开账号 · 签到动作走既有批量执行器（串行 + 互斥）</span>
         </header>
         <div v-if="!daily?.providers.length" class="ck-empty">没有可用账号。先到「号池」页登录或导入。</div>
         <div v-for="p in daily?.providers || []" :key="p.channel" class="ck-row" :class="{ open: expanded.has(keyOf('daily', p.channel)) }">
@@ -336,7 +397,6 @@ onUnmounted(() => {
       <section v-if="panels.has('onboarding')" class="ck-panel">
         <header class="ck-panel-head">
           <h3>新手福利</h3>
-          <span class="ck-panel-sub">一次性福利 · 已领取状态保存在本机台账（meta.onboardingGrants）· 领完无需重复查询 · 点击行展开任务清单</span>
         </header>
         <div v-for="row in onboardingRows" :key="row.id" class="ck-row" :class="{ open: expanded.has(keyOf('onboarding', row.id)) }">
           <div class="ck-row-main">
@@ -350,9 +410,11 @@ onUnmounted(() => {
             </div>
             <div class="ck-row-right">
               <span class="ck-tag" :class="row.settled ? 'ck-tag-ok' : 'ck-tag-warn'">{{ row.settled ? "全部领取" : "待查询" }}</span>
-              <button class="btn btn-sm" :disabled="isBusy(keyOf('onboarding', row.id))" @click="claimOnboarding(row)">
-                {{ isBusy(keyOf("onboarding", row.id)) ? "查询中…" : row.settled ? "重新查询" : "查询任务" }}
-              </button>
+              <el-tooltip content="查询即领取：会实查上游并顺手领取（接口幂等，已领过的不会重复领）" placement="top">
+                <button class="btn btn-sm" :disabled="isBusy(keyOf('onboarding', row.id))" @click="claimOnboarding(row)">
+                  {{ isBusy(keyOf("onboarding", row.id)) ? "查询中…" : row.settled ? "重新查询" : "查询任务" }}
+                </button>
+              </el-tooltip>
               <button class="ck-chev-btn" :aria-expanded="expanded.has(keyOf('onboarding', row.id))" @click="toggle(keyOf('onboarding', row.id))">
                 <i class="ck-chev">›</i>
               </button>
@@ -373,7 +435,7 @@ onUnmounted(() => {
                 失败 {{ onboardingResult[row.id].failed }} 项<template v-if="onboardingResult[row.id].points"> · 累计 {{ onboardingResult[row.id].points }} 积分</template>
               </p>
             </div>
-            <div v-else class="ck-empty-sm">还没有查询结果。点「查询任务」会实查上游并顺手领取（接口本身幂等）。</div>
+            <div v-else class="ck-empty-sm">还没有查询结果。</div>
             <p v-if="Object.keys(row.ledger).length" class="ck-note">
               台账：<template v-for="(v, k, i) in row.ledger" :key="k">{{ i ? " · " : "" }}{{ k }} → {{ ledgerText(v) }}</template>
             </p>
@@ -385,7 +447,7 @@ onUnmounted(() => {
       <section v-if="panels.has('plans')" class="ck-panel">
         <header class="ck-panel-head">
           <h3>活动福利</h3>
-          <span class="ck-panel-sub">限时体验套餐 · 领取需滑块验证码 · 逐份查看与领取</span>
+          <span class="ck-panel-sub">限时体验套餐 · 领取需滑块验证码</span>
         </header>
         <div v-for="row in planRows" :key="row.id" class="ck-row" :class="{ open: expanded.has(keyOf('plans', row.id)) }">
           <div class="ck-row-main">
@@ -393,8 +455,8 @@ onUnmounted(() => {
             <div class="ck-row-info">
               <span class="ck-row-name">{{ row.name }}</span>
               <span class="ck-row-desc">
-                <template v-if="row.claimAt">上次领取 {{ fmtAgo(row.claimAt) }} · 领取需通过滑块验证码</template>
-                <template v-else>{{ row.note || "活动期内每天一份 · 领取需滑块验证码" }}</template>
+                <template v-if="row.claimAt">上次领取 {{ fmtAgo(row.claimAt) }}</template>
+                <template v-else>{{ row.note || "活动期内每天一份" }}</template>
               </span>
             </div>
             <div class="ck-row-right">
@@ -417,21 +479,19 @@ onUnmounted(() => {
                   <span class="ck-plan-desc">{{ pl.description || "—" }}</span>
                   <span v-if="pl.endsAt" class="ck-plan-ends">截止 {{ fmtDate(pl.endsAt) }}</span>
                 </div>
-                <button
-                  class="btn btn-sm btn-primary"
-                  :disabled="webMode || isBusy(keyOf('plan', row.id, pl.planId))"
-                  :title="webMode ? '容器版没有图形环境，滑块验证码需要在桌面版完成' : ''"
-                  @click="claimPlan(row, pl)"
-                >
-                  {{ webMode ? "需桌面版" : isBusy(keyOf("plan", row.id, pl.planId)) ? "领取中…" : "领取" }}
-                </button>
+                <el-tooltip :disabled="!webMode" content="容器版没有图形环境，滑块验证码需要在桌面版完成" placement="top">
+                  <span style="display: inline-flex">
+                    <button
+                      class="btn btn-sm btn-primary"
+                      :disabled="webMode || isBusy(keyOf('plan', row.id, pl.planId))"
+                      @click="claimPlan(row, pl)"
+                    >
+                      {{ webMode ? "需桌面版" : isBusy(keyOf("plan", row.id, pl.planId)) ? "领取中…" : "领取" }}
+                    </button>
+                  </span>
+                </el-tooltip>
               </div>
-              <p class="ck-note">
-                领取需要完成一次人机校验（滑块 / 点选），桌面版会弹出官方验证窗口。
-                <template v-if="webMode">当前是容器形态，没有图形环境 —— 领取按钮已置灰，请到桌面版操作。</template>
-              </p>
             </div>
-            <div v-else class="ck-empty-sm">点「套餐明细」查询当前可领的活动套餐。</div>
           </div>
         </div>
       </section>
@@ -440,14 +500,12 @@ onUnmounted(() => {
       <section v-if="panels.has('growth')" class="ck-panel">
         <header class="ck-panel-head">
           <h3>成长任务</h3>
-          <span class="ck-panel-sub">任务清单 · 一键完成 / 领取奖励</span>
         </header>
         <div v-for="row in growthRows" :key="row.id" class="ck-row">
           <div class="ck-row-main">
             <span class="ck-badge">{{ row.channel.slice(0, 1).toUpperCase() }}</span>
             <div class="ck-row-info">
               <span class="ck-row-name">{{ row.name }}</span>
-              <span class="ck-row-desc">查询任务清单并执行</span>
             </div>
             <div class="ck-row-right">
               <button class="btn btn-sm" :disabled="isBusy(keyOf('growth', row.id))" @click="queryGrowth(row)">
@@ -464,11 +522,127 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.ck-day {
-  font-size: 12px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-  margin-right: 8px;
+/* ===== 顶部控制与状态栏 ===== */
+.ck-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  border-radius: var(--r-md, 10px);
+  background: var(--bg-card, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.08));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+}
+.ck-top-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ck-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok, #10b981);
+  box-shadow: 0 0 8px var(--ok, #10b981);
+  transition: all 0.3s ease;
+}
+.ck-live-dot.is-loading {
+  background: var(--accent, #38bdf8);
+  box-shadow: 0 0 10px var(--accent, #38bdf8);
+  animation: pulse 1s infinite alternate ease-in-out;
+}
+@keyframes pulse {
+  from { opacity: 0.4; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1.15); }
+}
+.ck-refresh-time {
+  font-size: 13px;
+  color: var(--text-2, rgba(255, 255, 255, 0.75));
+}
+.ck-refresh-time b {
+  font-weight: 600;
+  color: var(--text, #fff);
+  margin-left: 2px;
+}
+.ck-day-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1.5px 8px;
+  font-size: 11.5px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-3, rgba(255, 255, 255, 0.5));
+  background: var(--bg-soft, rgba(255, 255, 255, 0.05));
+  border-radius: var(--r-pill, 999px);
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.08));
+}
+.ck-auto-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 6px;
+  border-left: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+}
+.ck-auto-text {
+  font-size: 12.5px;
+  color: var(--text-2, rgba(255, 255, 255, 0.75));
+  user-select: none;
+}
+.ck-auto-hint {
+  font-size: 11.5px;
+  color: var(--accent-strong, #38bdf8);
+  margin-left: 2px;
+}
+.ck-top-right {
+  display: flex;
+  align-items: center;
+}
+
+/* 现代精致立体刷新按钮 */
+.ck-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--r-sm, 7px);
+  border: 1px solid var(--line-strong, rgba(255, 255, 255, 0.16));
+  background: linear-gradient(180deg, var(--bg-hover, rgba(255, 255, 255, 0.08)) 0%, var(--bg-card, rgba(255, 255, 255, 0.03)) 100%);
+  color: var(--text, #fff);
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.ck-refresh-btn:hover:not(:disabled) {
+  border-color: var(--accent-line, #38bdf8);
+  background: linear-gradient(180deg, var(--accent-dim, rgba(56, 189, 248, 0.18)) 0%, rgba(56, 189, 248, 0.06) 100%);
+  color: var(--accent-strong, #38bdf8);
+  box-shadow: 0 3px 10px -2px rgba(56, 189, 248, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
+}
+.ck-refresh-btn:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.ck-refresh-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+  transform: none;
+}
+.ck-btn-icon {
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+.ck-btn-icon.spinning {
+  animation: ckSpin 0.85s linear infinite;
+}
+@keyframes ckSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* 页面内错误横幅：toast 3 秒就没了，横幅负责「现在页面是坏的」这件事 */

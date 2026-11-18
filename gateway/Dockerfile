@@ -48,18 +48,21 @@ COPY --from=deps /app/node_modules ./node_modules
 # 整目录约数 MB，换「以后新增依赖零改动」
 COPY electron/backend ./electron/backend
 COPY gateway/src ./gateway/src
-COPY package.json ./
+# 授权条款与使用声明随镜像分发（README「使用声明」/ LICENSE 附加条款）
+COPY package.json LICENSE README.md ./
 
 # Web UI 产物（入口的 UI_DIR 默认 gateway/public；缺失时入口明确跳过静态托管，只提供 API）
 # 注意：本地验证时 dist 可能被拷到 gateway/public，镜像内以 ui 构建层为准（单源真相）
 COPY --from=ui /app/dist ./gateway/public
 
+# 端口默认 19527/19528（方案 v2 §D5）：桌面版本地网关默认占 9527，容器沿用会同机冲突，
+# 且冲突表现为「桌面版网关起不来」，排查成本极高。老部署升级在 compose/.env 显式写回旧端口即可。
 ENV AGENTHUB_DATA_DIR=/data \
     AGENTHUB_HOST=0.0.0.0 \
-    AGENTHUB_PROXY_PORT=9527 \
-    AGENTHUB_ADMIN_PORT=9528
+    AGENTHUB_PROXY_PORT=19527 \
+    AGENTHUB_ADMIN_PORT=19528
 
-EXPOSE 9527 9528
+EXPOSE 19527 19528
 
 # 不声明 VOLUME：与 compose bind mount 并用会产生「匿名卷幻影」（数据落在匿名卷而非宿主目录）
 RUN mkdir -p /data && chown node:node /data

@@ -36,12 +36,33 @@ function setRuntime(rt) {
   usagehook.setBroadcaster(runtime && typeof runtime.broadcast === "function" ? runtime.broadcast : null);
 }
 
+/** 广播网关启停及状态变化：让渲染层（侧边栏、总览、监控等）实时感知，无需轮询 */
+function broadcastStatus() {
+  if (runtime && typeof runtime.broadcast === "function") {
+    try {
+      const st = server.status();
+      const payload = {
+        event: "localgw",
+        type: "status",
+        running: !!st.running,
+        port: st.port,
+        bind: st.bind,
+        ts: Date.now(),
+      };
+      const r = runtime.broadcast(payload);
+      if (r && typeof r.then === "function") r.then(undefined, () => {});
+    } catch { /* 静默 */ }
+  }
+}
+
 /** 自动启动（autostart=true 时调用）
  *  默认 autostart=false：boot() 在这里短路，**绝不开监听端口**（方案：服务由用户显式启动）。 */
 async function autoStartIfNeeded() {
   const c = lgwConfig.get();
   if (!c.autostart) return { ok: true, skipped: true };
-  return await server.start();
+  const r = await server.start();
+  if (r && r.ok) broadcastStatus();
+  return r;
 }
 
 /** 已注册标记：main.cjs 在启动装配与模块开关两处都可能调 register，
@@ -61,10 +82,12 @@ function register(ipcMain) {
   ipcMain.handle("localgw_status", handle(async () => server.status()));
   ipcMain.handle("localgw_start", handle(async () => {
     const r = await server.start();
+    if (r.ok) broadcastStatus();
     return r.ok ? ok(r) : fail(r.message);
   }));
   ipcMain.handle("localgw_stop", handle(async () => {
     const r = await server.stop();
+    if (r.ok) broadcastStatus();
     return r.ok ? ok(r) : fail(r.message);
   }));
   ipcMain.handle("localgw_set_port", handle(async ({ port }) => {
@@ -76,8 +99,10 @@ function register(ipcMain) {
     if (server.state.running) {
       await server.stop();
       const r = await server.start();
+      if (r.ok) broadcastStatus();
       return r.ok ? ok({ port: r.port, bind: r.bind }) : fail(r.message);
     }
+    broadcastStatus();
     return ok({ port: lgwConfig.get().port });
   }));
   ipcMain.handle("localgw_set_autostart", handle(async ({ enabled }) => {
@@ -87,6 +112,7 @@ function register(ipcMain) {
   ipcMain.handle("localgw_restart", handle(async () => {
     await server.stop();
     const r = await server.start();
+    if (r.ok) broadcastStatus();
     return r.ok ? ok(r) : fail(r.message);
   }));
 
@@ -115,6 +141,9 @@ function register(ipcMain) {
   // ===== 路由 / 渠道 =====
   ipcMain.handle("localgw_route_get", handle(async () => routing.routeState()));
   ipcMain.handle("localgw_route_set", handle(async (patch) => routing.setRoute(patch || {})));
+  // 只读计划预览：这个模型的下一个请求会先落到哪个账号、其余候选为什么排后面。
+  // 不推进游标/不写粘性/不改账号状态，可以放心给排障面板轮询。
+  ipcMain.handle("localgw_route_plan", handle(async (args) => routing.previewPlan((args && args.model) || "", args || {})));
   ipcMain.handle("localgw_channel_toggle", handle(async ({ channel, enabled }) => {
     if (!channel) return fail("缺少渠道 id");
     const r = routing.setChannelEnabled(String(channel), !!enabled);
@@ -158,6 +187,42 @@ function register(ipcMain) {
   // 是加性合并，去掉键的提交不会真删（实测：键会从 base 存活，传 null 也只是存下 null）。
   // 删除必须在原始配置层做手术，见 models.cjs 的 removeRule 注释。
   ipcMain.handle("localgw_models_remove_rule", handle(async ({ kind, name }) => models.removeRule(kind, name)));
+
+  // 积分优先选号的只读预览：输入对外模型名，返回它当前会落到哪些「渠道 / 真实模型 / 账号」、
+  // 排序为什么是这样（不可用的候选也列出原因）。无副作用：只读号池资格，不改 lastUsed / 冷却。
+  // 本期不做界面——先作为排障与后续 UI 的稳定入口（字段名与 credit-picker.preview 一一对应）。
+  ipcMain.handle("localgw_credit_route_preview", handle(async ({ model } = {}) => {
+    const name = String(model || "").trim();
+    if (!name) return fail("缺少模型名");
+    const prepared = await models.prepare();
+    const declared = models.bindings(name, new Set(), prepared).filter((row) => !row.unavailable);
+    const rows = require("./credit-picker.cjs").preview({
+      bindings: declared,
+      catalogExcludeAccounts: (channel, realModel) => {
+        try { return prepared.catalog.excludedAccounts(channel, realModel); } catch { return []; }
+      },
+    });
+    return ok({
+      model: name,
+      candidates: rows.map((item, index) => ({
+        order: item.row ? index + 1 : 0,
+        channel: item.binding?.channel || "",
+        realModel: item.binding?.realModel || "",
+        source: item.binding?.source || "",
+        groupName: item.binding?.groupName || "",
+        accountId: item.row?.account?.id || "",
+        accountName: item.row?.account?.name || "",
+        bucket: item.row?.bucket || "",
+        rank: item.row ? item.row.rank : null,
+        expiresAt: Number(item.row?.account?.expiresAt) || 0,
+        credits: item.row?.account?.credits,
+        inFlight: item.row?.inFlight ?? 0,
+        limit: item.row?.limit ?? 0,
+        eligible: !!item.row,
+        reason: item.reason || "",
+      })),
+    });
+  }));
 
   // ===== 配置 =====
   ipcMain.handle("localgw_config_get", handle(async () => lgwConfig.get()));
